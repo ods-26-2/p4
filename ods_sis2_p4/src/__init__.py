@@ -1,0 +1,1 @@
+# Pacote do componente P4 (SIS-2 - Sinal e Dispositivo)

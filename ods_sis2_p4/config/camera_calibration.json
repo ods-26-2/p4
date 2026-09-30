@@ -1,0 +1,11 @@
+{
+  "camera_id": "IMX519_RPi4_01",
+  "image_width": 1280,
+  "image_height": 720,
+  "camera_matrix": [
+    [1050.5, 0.0, 640.0],
+    [0.0, 1052.1, 360.0],
+    [0.0, 0.0, 1.0]
+  ],
+  "distortion_coefficients": [-0.28, 0.09, 0.001, 0.0005, -0.01]
+}
