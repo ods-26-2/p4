@@ -1,0 +1,7 @@
+.venv/
+__pycache__/
+*.pyc
+
+data/dataset_calibracao/
+
+frame_teste.jpg
