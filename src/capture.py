@@ -1,7 +1,15 @@
 from .v4l2_capture import V4L2Capture
 
 
-class WebcamCapture:
+class Capture:
+    def read(self):
+        raise NotImplementedError
+
+    def release(self):
+        raise NotImplementedError
+
+
+class WebcamCapture(Capture):
     def __init__(self, device="/dev/video0"):
         self.camera = V4L2Capture(device)
 

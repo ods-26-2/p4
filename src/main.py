@@ -1,10 +1,17 @@
+#EScolha de qual captura estamos fazendo (mockado por enquanto)
 from .capture import WebcamCapture
+from .fake_capture import FakeCapture
+from .imx519_capture import IMX519Capture
+
 from .undistort import Undistorter
 from .metadata import FrameMetadata
 import cv2
 
-
-camera = WebcamCapture()
+#
+#camera = WebcamCapture()
+#camera = FakeCapture()
+camera = IMX519Capture()
+#
 undistorter = Undistorter()
 
 frame = camera.read()
