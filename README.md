@@ -1,6 +1,6 @@
 # SIS-2 — P4: Fonte de Vídeo
 
-Componente responsável pela captura, processamento e fornecimento de frames de vídeo para o projeto ODS.
+Componente responsável pela captura, processamento e fornecimento de frames de vídeo para o projeto de ODS.
 
 O P4 tem como objetivo levar o quadro da câmera até o software de forma confiável, mantendo informações de identificação e temporização do frame e permitindo a aplicação de correção de distorção da lente.
 
@@ -8,7 +8,7 @@ O P4 tem como objetivo levar o quadro da câmera até o software de forma confi�
 
 Câmera → Captura → Frame → Timestamp → Desdistorção → Frame + Metadados
 
-## Sprint 2
+## Sprint 1
 
 Nesta etapa, o desenvolvimento está focado na implementação e validação da lógica de software antes da integração com a plataforma final.
 
@@ -27,7 +27,7 @@ Nesta etapa, o desenvolvimento está focado na implementação e validação da 
 
 ### Implementado e validado
 
-* Captura de frames de webcam USB através de V4L2;
+* Captura de frames de webcam USB (para testes) através de V4L2;
 * Uso de buffers MMAP do V4L2;
 * Decodificação de frames MJPEG;
 * Extração de timestamp fornecido pelo kernel;
@@ -206,7 +206,7 @@ A lógica comum de processamento deverá permanecer independente da fonte de cap
 
 ## Objetivo final
 
-O P4 deverá fornecer aos demais componentes do ODS:
+O P4 deverá fornecer aos demais componentes do projeto:
 
 * frame de vídeo;
 * timestamp confiável;
