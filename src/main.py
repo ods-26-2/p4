@@ -4,6 +4,7 @@ import json
 from src.gstreamer_capture import GStreamerCapture
 from src.menu import escolher_camera, escolher_modo
 from src.metadata import FrameMetadata
+from src.video_recorder import VideoRecorder
 
 
 def main():
@@ -31,12 +32,24 @@ def main():
         print(f"Erro ao iniciar a câmera: {erro}")
         return
 
+    try:
+        recorder = VideoRecorder(
+            width=width,
+            height=height,
+            fps=fps
+        )
+    except RuntimeError as erro:
+        camera.release()
+        print(f"Erro ao iniciar a gravação: {erro}")
+        return
+
     print("\nCaptura contínua iniciada.")
     print("Pressione Ctrl+C para encerrar.\n")
 
     try:
         while True:
             frame = camera.read()
+            recorder.write(frame)
 
             metadata = FrameMetadata(
                 camera_id=camera_id,
@@ -64,7 +77,9 @@ def main():
         print("\nCaptura interrompida pelo usuário.")
 
     finally:
+        recorder.release()
         camera.release()
+        print(f"Vídeo salvo em: {recorder.output_path}")
         print("Câmera liberada.")
 
 
