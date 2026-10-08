@@ -5,3 +5,10 @@ __pycache__/
 data/dataset_calibracao/
 
 frame_teste.jpg
+
+# Arquivos temporários de validação
+frame_validacao.jpg
+teste_fps.py
+
+# Vídeos gerados durante os testes
+videos/
