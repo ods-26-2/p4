@@ -168,21 +168,63 @@ python -c "import gi; gi.require_version('Gst', '1.0'); from gi.repository impor
 
 Se o comando imprimir a versão do GStreamer sem apresentar erro, a integração básica está funcionando.
 
-### 6.5. Disponibilizar a webcam ao WSL2
+### 6.5. Conectar a webcam USB ao WSL2
 
-No Windows, o `usbipd` é utilizado para disponibilizar o dispositivo USB ao WSL2. O procedimento de conexão depende do estado atual do dispositivo e da instalação do `usbipd`.
+No ambiente de desenvolvimento com Windows e WSL2, a webcam USB precisa ser disponibilizada ao Ubuntu antes de ser utilizada pelo P4. Para isso, utiliza-se a ferramenta `usbipd` no Windows.
 
-Depois de conectar a câmera, no Ubuntu, verifique:
+**Etapa 1 — Verificar o dispositivo no Windows**
+
+Conecte a webcam ao computador e execute no PowerShell do Windows:
+
+```powershell
+usbipd list
+```
+
+Localize a EMEET SmartCam C60E 4K na lista e anote o `BUSID` correspondente. Esse identificador pode mudar conforme a porta USB utilizada.
+
+**Etapa 2 — Compartilhar o dispositivo, se necessário**
+
+Se o estado do dispositivo estiver como `Not shared`, abra o PowerShell como administrador e execute, substituindo `2-1` pelo BUSID exibido:
+
+```powershell
+usbipd bind --busid 2-1
+```
+
+O compartilhamento normalmente permanece configurado após reinicializações, desde que o dispositivo continue reconhecido pelo Windows.
+
+**Etapa 3 — Conectar a webcam ao WSL2**
+
+No PowerShell, execute:
+
+```powershell
+usbipd attach --wsl --busid 2-1
+```
+
+Substitua `2-1` pelo BUSID atual. Essa conexão pode precisar ser refeita após reiniciar o WSL2 ou desconectar a webcam.
+
+**Etapa 4 — Verificar o reconhecimento no Ubuntu**
+
+No terminal do Ubuntu/WSL2, execute:
 
 ```bash
 lsusb
-v4l2-ctl --list-devices
 ls /dev/video*
+v4l2-ctl --list-devices
 ```
 
-Se a câmera não aparecer, verifique a conexão USB, o vínculo do dispositivo com o WSL2 e as permissões de acesso aos dispositivos de vídeo.
+Confirme se a webcam aparece na lista USB e se existe um dispositivo de vídeo correspondente. No ambiente utilizado durante o desenvolvimento, o identificador USB da EMEET era `328f:00f3`.
 
-A configuração de acesso USB descrita aqui é específica do ambiente Windows/WSL2 e não deve ser aplicada automaticamente ao Raspberry Pi ou à Jetson.
+Se `v4l2-ctl` não estiver instalado, execute:
+
+```bash
+sudo apt update
+sudo apt install -y v4l-utils
+```
+
+Se a câmera não aparecer, verifique o estado do dispositivo com `usbipd list` no Windows e confirme se o comando `attach` foi executado com o BUSID correto.
+
+**Observação:** esse procedimento é específico para Windows com WSL2. Em um computador com Ubuntu instalado diretamente, normalmente basta conectar a webcam por USB e verificar se o sistema reconheceu o dispositivo.
+
 
 ## 7. Como executar
 
