@@ -13,13 +13,17 @@ class V4L2Source(VideoSource):
         device="/dev/video0",
         width=640,
         height=480,
-        pixel_format="MJPG"
+        pixel_format="MJPG",
+        sensor_mode=None
     ):
         self.device = Device(device)
         self.capture = None
 
         try:
             self.device.open()
+
+            if sensor_mode is not None:
+                self.device.controls.sensor_mode.value = sensor_mode
 
             self.capture = VideoCapture(self.device)
 
