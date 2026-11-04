@@ -6,7 +6,7 @@ from time import monotonic_ns
 from .source import VideoSource
 from .frame import Frame
 from .metadata import FrameMetadata
-
+from .capture_metrics import CaptureMetrics
 
 class P4:
     def __init__(
@@ -22,9 +22,13 @@ class P4:
         self.fps = fps
         self.raw = raw
         self.last_capture_ns = None
+        self.metrics = CaptureMetrics()
 
     def read(self) -> tuple[Frame, FrameMetadata]:
         frame = self.source.read()
+
+        # Registra o quadro recebido e verifica a sequência
+        self.metrics.atualizar(frame)
 
         if frame.timestamp_origin.startswith("driver_"):
             captured_at_ns = frame.timestamp_ns
@@ -63,31 +67,32 @@ class P4:
         return frame, metadata
 
 
+
     def run(
         self,
         consumer: Callable[[Frame, FrameMetadata], None],
         frame_limit: int | None = None,
         on_session_started: Callable[[dict], None] | None = None
     ) -> None:
-
-        if on_session_started is not None:
-            event = {
-                "event": "ods.session.started",
-                "source_id": self.source_id,
-                "session_id": self.session_id
-            }
-
-            on_session_started(event)
-
+    
         count = 0
-
+    
         while frame_limit is None or count < frame_limit:
             frame, metadata = self.read()
-
+    
+            # Anuncia a sessão após capturar o primeiro quadro
+            if count == 0 and on_session_started is not None:
+                event = {
+                    "event": "ods.session.started",
+                    "source_id": self.source_id,
+                    "session_id": self.session_id
+                }
+    
+                on_session_started(event)
+    
             consumer(frame, metadata)
-
+    
             count += 1
-
 
     def release(self) -> None:
         self.source.release()

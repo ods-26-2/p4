@@ -12,13 +12,10 @@ from .config import CAMERAS
 
 CAMERA_SELECIONADA = "emeet"
 
-# True: apenas captura e verifica os quadros
-# False: ativa a execução completa do P4
-MODO_DIAGNOSTICO = True
-
 # Quantidade de quadros no modo diagnóstico
 LIMITE_QUADROS = 30
 
+MODO_DIAGNOSTICO = True 
 CONVERTER_TIMESTAMP_UTC = False
 ATIVAR_KAFKA = True
 
@@ -31,6 +28,7 @@ def main():
     camera = None
     publisher = None
     kafka = None
+    p4 = None
 
     config = CAMERAS[CAMERA_SELECIONADA]
 
@@ -155,16 +153,28 @@ def main():
         print(f"Erro no P4: {erro}")
 
     finally:
-        if kafka is not None:
-            kafka.release()
 
-        if publisher is not None:
-            publisher.release()
+        if p4 is not None:
+            print(
+                "Métricas de captura:",
+                json.dumps(p4.metrics.resumo())
+            )
 
-        if camera is not None:
-            camera.release()
+        # Libera o vídeo e a câmera antes de aguardar o Kafka
+        try:
+            if publisher is not None:
+                print("Métricas de transmissão:", json.dumps(publisher.resumo()))
+                publisher.release()
 
-        print("Recursos liberados.")
+        finally:
+            try:
+                if camera is not None:
+                    camera.release()
+            finally:
+                if kafka is not None:
+                    kafka.release()
+
+                print("Recursos de captura liberados.")
 
 
 if __name__ == "__main__":

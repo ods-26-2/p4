@@ -1,4 +1,4 @@
-
+import os
 import gi
 
 gi.require_version("Gst", "1.0")
@@ -18,6 +18,17 @@ class SHMPublisher:
     ):
         self.width = width
         self.height = height
+
+        self.frames_aceitos_appsrc = 0
+        self.bytes_aceitos_appsrc = 0
+
+        self.socket_path = socket_path
+
+        if os.path.lexists(socket_path):
+            raise RuntimeError(
+                f"O socket SHM já existe: {socket_path}. "
+                "Verifique se há outro P4 ativo ou um socket antigo."
+            )
 
         pipeline_description = (
             "appsrc name=source is-live=true "
@@ -60,6 +71,15 @@ class SHMPublisher:
             raise RuntimeError(
                 f"Falha ao enviar quadro: {result}"
             )
+        
+        self.frames_aceitos_appsrc += 1
+        self.bytes_aceitos_appsrc += len(frame.data)
+
+    def resumo(self):
+         return {
+            "frames_aceitos_appsrc": self.frames_aceitos_appsrc,
+            "bytes_aceitos_appsrc": self.bytes_aceitos_appsrc
+        }
 
     def release(self) -> None:
         self.pipeline.set_state(Gst.State.NULL)
