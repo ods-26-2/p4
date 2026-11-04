@@ -1,9 +1,16 @@
+
 from dataclasses import dataclass
+
 
 @dataclass
 class FrameMetadata:
-    camera_id: str
+    source_id: str
+    session_id: str
+    frame_index: int
     width: int
     height: int
-    fps: float
-    is_undistorted: bool
+    pixel_format: str
+    fps: float | None
+    raw: bool
+    captured_at_ns: int | None
+    received_at_ns: int | None

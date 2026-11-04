@@ -1,435 +1,508 @@
 # SIS-2 — P4: Fonte de Vídeo
 
-Componente responsável pela captura de vídeo, representação dos frames, geração de metadados temporais e gravação de vídeo para o ecossistema ODS.
+Componente **P4 — Fonte de Vídeo**, integrante do SIS-2 (Sinal e Dispositivo) do projeto ODS.
 
-O objetivo do P4 é receber imagens de uma câmera e disponibilizá-las ao restante do sistema de forma organizada, com identificadores, informações de temporização e formato consistente. Futuramente, o componente deverá oferecer suporte à correção da distorção da lente e à integração com as câmeras da plataforma embarcada.
+O P4 captura quadros de uma câmera, preserva as informações temporais e de sequência disponibilizadas pelo driver e entrega **vídeo** e **metadados** por canais distintos:
 
-## 1. Objetivos e responsabilidades
+- **GStreamer + memória compartilhada (SHM):** transmissão local de imagens para o consumidor de vídeo, como o I1.
+- **Apache Kafka:** publicação de eventos de início de sessão e de metadados dos quadros.
 
-- Detectar e selecionar câmeras compatíveis com a implementação disponível.
-- Capturar frames continuamente.
-- Representar cada frame com imagem, identificador sequencial e timestamp.
-- Disponibilizar metadados associados à captura.
-- Gravar o fluxo capturado em arquivo de vídeo.
-- Preparar a arquitetura para a integração com os demais componentes ODS.
-- Evoluir para o uso das câmeras e da plataforma embarcada definidas pelo projeto.
+O projeto também possui um **modo diagnóstico**, usado para verificar a captura sem depender de GStreamer/SHM ou Kafka. Esse é o modo previsto para o primeiro teste com a IMX519 na Jetson.
 
-## 2. Fluxo atual
+> **Estado atual:** captura, modo diagnóstico, transmissão SHM e publicação Kafka foram testados com a webcam **EMEET SmartCam C60E 4K no WSL2**. A captura das câmeras **Arducam IMX519 e IMX477 na Jetson ainda não foi validada**. A correspondência exata entre os quadros recebidos pelo I1 e seus eventos Kafka também está pendente.
 
-O fluxo principal implementado para a webcam USB é:
+## 1. Responsabilidades e arquitetura
 
-**Câmera USB → GStreamer/V4L2 → Frame → Timestamp e metadados → Gravação em MP4**
+O componente é responsável por:
 
-O GStreamer gerencia o pipeline de captura e decodificação. Os frames são representados pela classe `Frame`, enquanto os metadados são organizados pela classe `FrameMetadata`.
+1. Inicializar uma fonte de vídeo e capturar seus buffers.
+2. Representar cada quadro por meio de `Frame` e gerar seus metadados em `FrameMetadata`.
+3. Preservar, quando disponíveis, número de sequência e timestamp fornecidos pelo driver V4L2.
+4. Disponibilizar os quadros ao consumidor por GStreamer/SHM.
+5. Publicar eventos leves no Kafka sem enviar os pixels pelo broker.
+6. Oferecer diagnóstico de captura, permitindo investigar sensores e drivers isoladamente.
 
-O programa principal realiza a captura contínua, registra as informações de cada frame no terminal em formato JSON e encaminha as imagens ao gravador de vídeo.
+Fluxo implementado para a webcam EMEET:
 
-## 3. Estado atual — Sprint 1
+```text
+EMEET (USB) ── V4L2 / linuxpy ── Frame ── P4
+                                        │
+                  ┌─────────────────────┴──────────────────────┐
+                  │                                            │
+           SHMPublisher                                 KafkaPublisher
+        MJPEG → JPEG decoder → BGR                  Eventos JSON por quadro
+                  │                                            │
+       GStreamer shmsink                            ods.session.started
+                  │                                 ods.p4.frame
+        /tmp/p4_video_shm                                     │
+                  │                                   Consumidores Kafka
+       shmsrc → I1 (simulado)
+```
 
-### 3.1. Funcionalidades validadas
+**Importante:** a câmera EMEET entrega **MJPEG** ao `V4L2Source`, mas a pipeline SHM transmite **BGR** após decodificação. O campo `format` dos metadados atualmente descreve o formato **capturado**, não o formato de saída SHM.
 
-Os seguintes comportamentos tiveram sucesso confirmado no ambiente de desenvolvimento atual, utilizando a webcam USB EMEET SmartCam C60E 4K conectada ao WSL2:
+A implementação atual da `SHMPublisher` aceita **MJPEG** e usa `jpegdec`; portanto, o **modo completo não está pronto para transmitir diretamente o Bayer RAW10 da IMX519**. Primeiro será validada a captura no modo diagnóstico; a adaptação da transmissão virá depois.
 
-- Detecção e seleção da webcam USB.
-- Exibição dos modos de resolução e FPS configurados para a câmera.
-- Captura contínua utilizando GStreamer.
-- Captura configurada para 1280 × 720 a 30 FPS.
-- Decodificação de imagens MJPEG e conversão para o formato BGR utilizado pelo OpenCV.
-- Representação dos frames com imagem, timestamp e identificador sequencial.
-- Emissão de metadados em JSON no terminal durante a captura.
-- Geração de arquivo de vídeo MP4.
-- Reprodução correta do vídeo gerado.
-- Encerramento da captura e liberação dos recursos ao pressionar `Ctrl+C`.
+A correção da distorção da lente **não integra as responsabilidades atuais do P4**. Quando necessária, deverá ser executada por componentes posteriores a partir dos parâmetros de calibração apropriados.
 
-Essas validações correspondem ao ambiente e à configuração testados. Não representam garantia de funcionamento em outros sistemas operacionais, câmeras ou plataformas embarcadas.
+## 2. Estado de implementação
 
-### 3.2. Funcionalidades pendentes de validação
+| Recurso | Estado |
+|---|---|
+| Captura de quadros da EMEET via V4L2 | Validado no WSL2 |
+| Leitura de resolução, formato, sequência e timestamps | Validado com EMEET |
+| Modo diagnóstico independente de SHM/Kafka | Validado com EMEET (30 quadros) |
+| Transmissão de vídeo GStreamer/SHM | Validada com EMEET |
+| Recepção por processo Python simulando I1 | Validada (30 quadros, 640 × 480) |
+| Publicação de `ods.p4.frame` no Kafka | Validada (150 mensagens no teste integrado) |
+| Publicação de `ods.session.started` | Validada |
+| Conversão opcional do timestamp para UTC | Validada como apresentação aproximada |
+| Correlação inequívoca de cada buffer SHM com o `frame_id` Kafka | Pendente |
+| Captura IMX519 / IMX477 na Jetson | Pendente |
+| SHM para formatos RAW10 / câmeras CSI | Pendente |
+| Ensaios prolongados de perdas, memória e recuperação de falhas | Pendentes |
 
-- Medição sistemática de perda de frames na implementação principal baseada em GStreamer.
-- Avaliação de consumo de memória durante capturas prolongadas.
-- Calibração real da câmera e obtenção dos parâmetros de distorção.
-- Aplicação e validação da correção de distorção com parâmetros reais.
-- Definição da interface de saída dos frames e metadados para os demais componentes ODS.
-- Validação da câmera Arducam IMX519 no Raspberry Pi 4.
-- Integração e validação das câmeras na plataforma Jetson.
-- Verificação das exigências temporais e do significado do timestamp em relação ao instante de exposição do sensor.
-- Validação sistemática dos modos de resolução e FPS além da configuração já testada.
+Esses resultados descrevem os testes realizados; não representam homologação de desempenho ou confiabilidade em produção.
 
-## 4. Ambiente de desenvolvimento
+## 3. Estrutura do projeto
 
-### 4.1. Ambiente atualmente utilizado
+Arquivos principais da implementação atual:
 
-- Sistema operacional hospedeiro: Windows.
-- Ambiente de execução: WSL2 com Ubuntu.
-- Linguagem: Python 3.
-- Câmera de teste: EMEET SmartCam C60E 4K, conectada por USB.
-- Captura principal: GStreamer com fonte V4L2.
-- Processamento de imagens: OpenCV e NumPy.
-- Gravação de vídeo: OpenCV `VideoWriter`.
+```text
+P4/
+├── src/
+│   ├── __init__.py
+│   ├── main.py             # Seleção de câmera, modo e execução
+│   ├── config.py           # Configurações EMEET, IMX519 e IMX477
+│   ├── source.py           # Interface VideoSource
+│   ├── v4l2_source.py      # Captura V4L2 via linuxpy
+│   ├── webcam_source.py    # Alternativa de captura via OpenCV
+│   ├── frame.py            # Estrutura Frame
+│   ├── metadata.py         # Estrutura FrameMetadata
+│   ├── p4.py               # Sessão, leitura e processamento dos quadros
+│   ├── clock.py            # Conversão aproximada monotônico → UTC
+│   ├── events.py           # Montagem dos eventos de metadados
+│   ├── shm_publisher.py    # Publicação de vídeo via GStreamer/SHM
+│   └── kafka_publisher.py  # Produtor de eventos Kafka
+├── tests/
+│   └── shm_reader.py       # Leitor SHM que simula o consumidor I1
+├── .gitignore
+├── requirements.txt
+└── README.md
+```
 
-A webcam é disponibilizada ao WSL2 por meio do `usbipd` no Windows.
+Outros testes ou diretórios antigos podem estar presentes localmente. A pasta `src_old/` é um backup da implementação anterior e **não faz parte da aplicação atual**.
 
-### 4.2. Hardware previsto para integração
+## 4. Configurações
 
-- Raspberry Pi 4 com 8 GB de RAM.
-- Arducam IMX519 com foco automático por VCM.
-- Plataforma Jetson definida pelo projeto para a execução final.
+### 4.1. Câmeras — `src/config.py`
 
-A integração com esses dispositivos permanece pendente de validação. A implementação existente para IMX519 não significa que o pipeline esteja pronto ou testado nesses equipamentos.
+As configurações ficam em `CAMERAS`, com uma entrada para cada fonte:
+
+| Câmera | Finalidade atual | Situação |
+|---|---|---|
+| `emeet` | Desenvolvimento e integração no WSL2 | Habilitada e validada |
+| `imx519` | Primeira câmera CSI para testes na Jetson | Configuração preliminar; captura pendente |
+| `imx477` | Segunda câmera CSI planejada para a Jetson | Configuração incompleta; desabilitada |
+
+Cada entrada contém `source_id`, `device`, `width`, `height`, `fps`, `pixel_format`, `raw`, `socket_path` e `enabled`.
+
+Na EMEET, os valores testados foram `/dev/video0`, **640 × 480**, `MJPG` e `raw=False`.
+
+Para a IMX519, a configuração inicial de diagnóstico utiliza **1920 × 1080** e **`RG10`** (Bayer RAW10), com dispositivo inicialmente indicado como `/dev/video0`. Esses parâmetros foram anunciados anteriormente pelo driver, **mas a entrega real dos buffers ainda precisa ser confirmada**. Os caminhos `/dev/videoX` podem mudar; sempre verificar na Jetson.
+
+Os sockets SHM são configuráveis por fonte. **A existência de duas entradas no dicionário não significa que a captura simultânea das duas câmeras já esteja implementada**: o `main.py` atual seleciona uma fonte por execução.
+
+### 4.2. Execução — `src/main.py`
+
+As variáveis no início do arquivo controlam o comportamento:
+
+```python
+CAMERA_SELECIONADA = "emeet"       # "emeet", "imx519" ou "imx477"
+MODO_DIAGNOSTICO = True         # True: somente captura
+LIMITE_QUADROS = 30             # Usado no modo diagnóstico
+CONVERTER_TIMESTAMP_UTC = False # Adiciona campo UTC sem remover timestamp original
+ATIVAR_KAFKA = True             # Usado somente no modo completo
+```
+
+- **Diagnóstico (`True`):** captura `LIMITE_QUADROS`, mostra periodicamente formato, bytes, timestamp, origem e FPS; não inicializa SHM nem Kafka. Ainda imprime o evento local `ods.session.started`.
+- **Completo (`False`):** captura continuamente, envia vídeo por SHM e, se `ATIVAR_KAFKA=True`, publica eventos no Kafka. O pipeline atual requer MJPEG.
+- **UTC (`True`):** adiciona `captured_at_utc` à mensagem, preservando o inteiro `timestamp` em nanossegundos.
+
+O endereço Kafka é lido da variável de ambiente `P4_KAFKA_BOOTSTRAP_SERVERS`. Quando o Kafka estiver ativado no modo completo, ela deverá estar configurada.
 
 ## 5. Dependências
 
-É importante distinguir os pacotes Python das bibliotecas e ferramentas instaladas no Ubuntu.
+### 5.1. Python
 
-### 5.1. Dependências Python
+O `requirements.txt` da implementação atual deve incluir:
 
-O arquivo `requirements.txt` contém:
+```text
+linuxpy==0.25.0
+confluent-kafka==2.16.1
+numpy
+opencv-python
+```
 
-- `numpy`
-- `opencv-python`
-- `psutil`
+As versões fixadas de `linuxpy` e `confluent-kafka` correspondem ao ambiente WSL testado. **Não foi comprovada ainda a compatibilidade dessas versões com o Python e o sistema ARM64 da Jetson.** Para o primeiro diagnóstico CSI, a dependência principal é `linuxpy`.
 
-O `psutil` é utilizado em ferramentas auxiliares de monitoramento. A lista de dependências deve ser atualizada caso novas bibliotecas passem a ser necessárias.
+### 5.2. Ubuntu / GStreamer
 
-### 5.2. Dependências do sistema
-
-O fluxo principal depende de componentes do GStreamer e da integração entre Python e GStreamer.
-
-Pacotes utilizados no ambiente atual incluem:
-
-- `python3-gi`
-- `gir1.2-gstreamer-1.0`
-- `gstreamer1.0-tools`
-- `gstreamer1.0-plugins-base`
-- `gstreamer1.0-plugins-good`
-- `v4l-utils`
-
-O pipeline utiliza os elementos GStreamer `v4l2src`, `jpegdec`, `videoconvert` e `appsink`.
-
-Os pacotes acima correspondem ao ambiente verificado durante o desenvolvimento. Uma instalação nova pode precisar de outros pacotes ou plugins, dependendo da distribuição e da configuração utilizada.
-
-## 6. Instalação do ambiente
-
-Os comandos abaixo são destinados ao Ubuntu no WSL2.
-
-### 6.1. Instalar ferramentas e bibliotecas do sistema
+Para captura e teste SHM no Ubuntu/WSL2:
 
 ```bash
 sudo apt update
-
 sudo apt install -y \
-    python3 \
-    python3-venv \
-    python3-pip \
-    python3-gi \
-    gir1.2-gstreamer-1.0 \
-    gstreamer1.0-tools \
-    gstreamer1.0-plugins-base \
-    gstreamer1.0-plugins-good \
-    v4l-utils \
-    usbutils
+  python3 python3-venv python3-pip \
+  python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+  gstreamer1.0-tools gstreamer1.0-plugins-base \
+  gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+  v4l-utils usbutils
 ```
 
-Esses comandos instalam os pacotes principais documentados para o ambiente atual. Caso algum elemento do pipeline não esteja disponível, pode ser necessário instalar o pacote GStreamer correspondente à distribuição.
+O pacote `gstreamer1.0-plugins-bad` disponibilizou os elementos `shmsink` e `shmsrc` no ambiente testado. As bibliotecas `gi`/GStreamer são providas pelo sistema e não apenas pelo `pip`.
 
-### 6.2. Criar e ativar o ambiente virtual
-
-Na pasta do componente P4:
+Criar um ambiente virtual na raiz do projeto:
 
 ```bash
 python3 -m venv --system-site-packages .venv
 source .venv/bin/activate
-```
-
-O parâmetro `--system-site-packages` permite que o ambiente virtual acesse pacotes Python disponibilizados pelo sistema, como a integração `gi` instalada pelo Ubuntu.
-
-### 6.3. Instalar as dependências Python
-
-```bash
 python -m pip install -r requirements.txt
 ```
 
-### 6.4. Verificar a instalação do GStreamer
+`--system-site-packages` permite que o ambiente virtual encontre o `gi` instalado pelo Ubuntu. Na Jetson, o procedimento de instalação deve ser ajustado conforme a versão do Python e as bibliotecas disponíveis no JetPack.
+
+Verificações úteis:
 
 ```bash
-gst-inspect-1.0 v4l2src
-gst-inspect-1.0 jpegdec
-gst-inspect-1.0 videoconvert
-gst-inspect-1.0 appsink
-```
-
-Os quatro comandos devem reconhecer seus respectivos elementos.
-
-Verifique também a integração com Python:
-
-```bash
+python -c "import linuxpy; print('linuxpy OK')"
 python -c "import gi; gi.require_version('Gst', '1.0'); from gi.repository import Gst; Gst.init(None); print(Gst.version_string())"
+gst-inspect-1.0 shmsink
+gst-inspect-1.0 shmsrc
 ```
 
-Se o comando imprimir a versão do GStreamer sem apresentar erro, a integração básica está funcionando.
+## 6. Conectar a EMEET ao WSL2
 
-### 6.5. Conectar a webcam USB ao WSL2
+O Windows precisa compartilhar a câmera USB com o Linux do WSL2 por meio do **usbipd**. O procedimento pode precisar ser repetido após reiniciar o computador ou desconectar o dispositivo.
 
-No ambiente de desenvolvimento com Windows e WSL2, a webcam USB precisa ser disponibilizada ao Ubuntu antes de ser utilizada pelo P4. Para isso, utiliza-se a ferramenta `usbipd` no Windows.
-
-**Etapa 1 — Verificar o dispositivo no Windows**
-
-Conecte a webcam ao computador e execute no PowerShell do Windows:
+**No PowerShell do Windows:**
 
 ```powershell
 usbipd list
 ```
 
-Localize a EMEET SmartCam C60E 4K na lista e anote o `BUSID` correspondente. Esse identificador pode mudar conforme a porta USB utilizada.
+Encontre a câmera EMEET e seu `BUSID` atual. No ambiente de desenvolvimento, o dispositivo foi identificado como `328f:00f3`. **O BUSID não é fixo**: use o exibido no seu computador.
 
-**Etapa 2 — Compartilhar o dispositivo, se necessário**
-
-Se o estado do dispositivo estiver como `Not shared`, abra o PowerShell como administrador e execute, substituindo `2-1` pelo BUSID exibido:
+Se necessário, no PowerShell **como administrador**, compartilhe o dispositivo (substitua `BUSID`):
 
 ```powershell
-usbipd bind --busid 2-1
+usbipd bind --busid BUSID
 ```
 
-O compartilhamento normalmente permanece configurado após reinicializações, desde que o dispositivo continue reconhecido pelo Windows.
-
-**Etapa 3 — Conectar a webcam ao WSL2**
-
-No PowerShell, execute:
+Depois conecte ao WSL:
 
 ```powershell
-usbipd attach --wsl --busid 2-1
+usbipd attach --wsl --busid BUSID
 ```
 
-Substitua `2-1` pelo BUSID atual. Essa conexão pode precisar ser refeita após reiniciar o WSL2 ou desconectar a webcam.
-
-**Etapa 4 — Verificar o reconhecimento no Ubuntu**
-
-No terminal do Ubuntu/WSL2, execute:
+**No Ubuntu/WSL2:**
 
 ```bash
 lsusb
 ls /dev/video*
 v4l2-ctl --list-devices
+v4l2-ctl -d /dev/video0 --list-formats-ext
 ```
 
-Confirme se a webcam aparece na lista USB e se existe um dispositivo de vídeo correspondente. No ambiente utilizado durante o desenvolvimento, o identificador USB da EMEET era `328f:00f3`.
+Confirme qual `/dev/videoX` corresponde à captura da EMEET. No ambiente testado foi `/dev/video0`, mas a numeração pode mudar. Se necessário, atualize `device` em `src/config.py`.
 
-Se `v4l2-ctl` não estiver instalado, execute:
+Se houver erro de permissão, verifique o grupo do dispositivo (`ls -l /dev/video0`). Em configurações usuais, o usuário precisa pertencer ao grupo `video`; uma mudança de grupo pode exigir novo login.
 
-```bash
-sudo apt update
-sudo apt install -y v4l-utils
+## 7. Executar o P4
+
+Todos os comandos a seguir devem ser executados na raiz do repositório, com o ambiente virtual ativado.
+
+### 7.1. Modo diagnóstico — somente captura
+
+Em `src/main.py`:
+
+```python
+CAMERA_SELECIONADA = "emeet"
+MODO_DIAGNOSTICO = True
+LIMITE_QUADROS = 30
 ```
 
-Se a câmera não aparecer, verifique o estado do dispositivo com `usbipd list` no Windows e confirme se o comando `attach` foi executado com o BUSID correto.
-
-**Observação:** esse procedimento é específico para Windows com WSL2. Em um computador com Ubuntu instalado diretamente, normalmente basta conectar a webcam por USB e verificar se o sistema reconheceu o dispositivo.
-
-
-## 7. Como executar
-
-Na pasta raiz do componente P4, com o ambiente virtual ativado:
+Execute:
 
 ```bash
 python -m src.main
 ```
 
-O programa apresenta as câmeras reconhecidas pela configuração atual e solicita a seleção da câmera e do modo de captura disponível.
-
-Durante a execução:
-
-- Os frames são capturados continuamente.
-- Os metadados são impressos no terminal em formato JSON.
-- O vídeo é gravado no diretório `videos/`.
-- A captura pode ser encerrada com `Ctrl+C`.
-
-O caminho padrão do vídeo gerado é:
+Exemplo de saída observada com a EMEET:
 
 ```text
-videos/video_capturado.mp4
+P4 iniciado | Câmera: emeet | Modo: DIAGNÓSTICO
+{"event": "ods.session.started", "source_id": "emeet", "session_id": "..."}
+Frame 0 | 640x480 | Formato: MJPG | Tamanho: 22532 bytes | Timestamp: 10731128077000 ns | Origem: driver_soe | FPS: None
+Frame 10 | 640x480 | Formato: MJPG | ... | FPS: 15.64
+Frame 20 | 640x480 | Formato: MJPG | ... | FPS: 15.63
+Diagnóstico finalizado com sucesso!
+Recursos liberados.
 ```
 
-O encerramento por `Ctrl+C` foi validado no ambiente de desenvolvimento atual.
+O programa finaliza automaticamente após o número configurado de quadros. Esse modo é a primeira etapa para testar a IMX519 na Jetson.
 
-## 8. Frames e metadados
+### 7.2. Modo completo — SHM + Kafka
 
-### 8.1. Representação do frame
+Este modo **já foi validado com a EMEET**, não com RAW10 das câmeras CSI.
 
-A classe `Frame`, definida em `src/frame.py`, representa uma imagem capturada com os seguintes campos:
+Em `src/main.py`:
 
-| Campo | Descrição |
-|---|---|
-| `image` | Imagem do frame representada como array NumPy |
-| `timestamp_ns` | Timestamp associado ao buffer, em nanossegundos |
-| `frame_id` | Identificador sequencial atribuído aos frames retornados pela implementação |
-
-O identificador sequencial é gerado pelo software. Ele não deve ser interpretado como o número original do frame fornecido pelo sensor.
-
-### 8.2. Metadados
-
-A classe `FrameMetadata`, definida em `src/metadata.py`, organiza as informações descritivas da captura:
-
-| Campo | Descrição |
-|---|---|
-| `camera_id` | Identificador lógico da câmera selecionada |
-| `width` | Largura do frame em pixels |
-| `height` | Altura do frame em pixels |
-| `fps` | FPS configurado para a captura |
-| `is_undistorted` | Indica se o frame foi corrigido quanto à distorção |
-
-O programa principal emite os metadados no terminal em formato JSON. Os campos atuais incluem:
-
-- `camera_id`
-- `frame_id`
-- `timestamp_ns`
-- `resolution_width`
-- `resolution_height`
-- `fps`
-- `is_undistorted`
-- `shutter_speed_us`
-- `gain_db`
-
-Os campos `shutter_speed_us` e `gain_db` são atualmente preenchidos com `null`, pois não há coleta desses valores no fluxo principal validado.
-
-O campo `fps` representa a configuração escolhida, e não uma medição contínua da taxa real de frames.
-
-### 8.3. Considerações sobre o timestamp
-
-Na implementação principal, o timestamp é obtido do buffer do GStreamer. Ele é expresso em nanossegundos e associado ao processamento do frame dentro do pipeline.
-
-Esse valor não deve ser tratado automaticamente como o instante físico de exposição do sensor. A semântica temporal exata, a origem do relógio e a adequação aos requisitos do ODS precisam ser verificadas antes de uma integração que dependa de sincronização precisa.
-
-## 9. Estrutura do projeto
-
-A estrutura abaixo destaca os principais arquivos existentes no componente:
-
-```text
-P4/
-├── config/
-│   └── camera_calibration.json
-├── data/
-│   └── dataset_calibracao/
-├── src/
-│   ├── __init__.py
-│   ├── camera_config.py
-│   ├── camera_detector.py
-│   ├── capture.py
-│   ├── fake_capture.py
-│   ├── frame.py
-│   ├── gstreamer_capture.py
-│   ├── imx519_capture.py
-│   ├── main.py
-│   ├── menu.py
-│   ├── metadata.py
-│   ├── undistort.py
-│   ├── v4l2_capture.py
-│   └── video_recorder.py
-├── tests/
-│   ├── coletar_calibracao.py
-│   ├── teste_captura_video.py
-│   ├── teste_frame_drops.py
-│   ├── teste_memoria.py
-│   ├── teste_undistort.py
-│   └── teste_v4l2_timestamp.py
-├── .gitignore
-├── README.md
-└── requirements.txt
+```python
+CAMERA_SELECIONADA = "emeet"
+MODO_DIAGNOSTICO = False
+ATIVAR_KAFKA = True
 ```
 
-Os diretórios de dados de calibração e de vídeos gerados podem conter arquivos locais que não são versionados pelo Git. A listagem acima descreve os arquivos de código e configuração, não garante que todos os diretórios de dados estejam presentes em um clone novo.
+No terminal do P4:
 
-### 9.1. Principais módulos
+```bash
+source .venv/bin/activate
+export P4_KAFKA_BOOTSTRAP_SERVERS="localhost:9092"
+python -m src.main
+```
 
-| Arquivo | Responsabilidade |
+`localhost:9092` é o broker **local de desenvolvimento** descrito na seção seguinte; não é o endereço definitivo da infraestrutura da equipe. Para utilizar somente SHM, defina `ATIVAR_KAFKA = False`.
+
+Em outro terminal, com o P4 ainda em execução, inicie o leitor que simula o I1:
+
+```bash
+source .venv/bin/activate
+python tests/shm_reader.py
+```
+
+O leitor deve receber 30 quadros, informar as dimensões e salvar `i1_frame.jpg` para inspeção visual. O leitor usa GStreamer diretamente pelo Python (`gi`), sem depender de OpenCV compilado com suporte a `CAP_GSTREAMER`.
+
+Encerre o P4 com `Ctrl+C`.
+
+## 8. Kafka local para desenvolvimento
+
+Instalar somente `confluent-kafka` **não instala o broker**. Nos testes, o broker foi executado por Docker no WSL2, com a imagem `apache/kafka:4.4.0`.
+
+### 8.1. Inicializar o broker
+
+Com Docker instalado e ativo:
+
+```bash
+sudo service docker start
+sudo docker run -d --name p4-kafka -p 127.0.0.1:9092:9092 apache/kafka:4.4.0
+```
+
+O comando `docker run` cria o contêiner **uma vez**. Se ele já existir e estiver parado, reutilize-o:
+
+```bash
+sudo docker start p4-kafka
+```
+
+Verifique:
+
+```bash
+sudo docker ps
+```
+
+A porta foi exposta somente no endereço de loopback do computador de desenvolvimento. Isso não configura acesso de outras máquinas ao broker.
+
+### 8.2. Criar os tópicos
+
+```bash
+sudo docker exec p4-kafka /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --create --if-not-exists --topic ods.session.started \
+  --partitions 1 --replication-factor 1
+
+sudo docker exec p4-kafka /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 \
+  --create --if-not-exists --topic ods.p4.frame \
+  --partitions 1 --replication-factor 1
+
+sudo docker exec p4-kafka /opt/kafka/bin/kafka-topics.sh \
+  --bootstrap-server localhost:9092 --list
+```
+
+Os tópicos esperados são `ods.session.started` e `ods.p4.frame`.
+
+### 8.3. Consumir mensagens e confirmar a publicação
+
+Com o P4 em modo completo e Kafka ativado:
+
+```bash
+sudo docker exec p4-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic ods.p4.frame --max-messages 5
+```
+
+Para conferir eventos de início de sessão:
+
+```bash
+sudo docker exec p4-kafka /opt/kafka/bin/kafka-console-consumer.sh \
+  --bootstrap-server localhost:9092 \
+  --topic ods.session.started --max-messages 1
+```
+
+Sem `--from-beginning`, os comandos aguardam eventos novos; inicie o consumidor antes de iniciar a próxima sessão do P4. Para investigar eventos antigos, acrescente `--from-beginning`.
+
+O envio do produtor é **assíncrono**: colocar uma mensagem na fila não equivale a receber uma confirmação de entrega. O código atual trata callbacks de erro e tenta finalizar envios pendentes ao encerrar, mas ainda falta monitoramento sistemático de perdas e recuperação de falhas.
+
+## 9. Frames, timestamps e metadados
+
+### 9.1. Estrutura `Frame`
+
+`src/frame.py` representa cada quadro por:
+
+| Campo | Significado |
 |---|---|
-| `camera_config.py` | Configurações e modos conhecidos das câmeras |
-| `camera_detector.py` | Detecção de dispositivos de vídeo |
-| `menu.py` | Seleção da câmera e do modo de captura |
-| `gstreamer_capture.py` | Captura principal via pipeline GStreamer |
-| `frame.py` | Representação do frame |
-| `metadata.py` | Estrutura de metadados |
-| `video_recorder.py` | Gravação do vídeo em MP4 |
-| `undistort.py` | Aplicação da correção de distorção |
-| `main.py` | Orquestração da captura e gravação |
+| `data` | Bytes capturados do dispositivo (por exemplo, JPEG comprimido na EMEET) |
+| `width`, `height` | Dimensões do quadro |
+| `pixel_format` | Formato informado pela captura V4L2 |
+| `timestamp_ns` | Timestamp em unidade de nanossegundos |
+| `frame_index` | Número sequencial fornecido pelo buffer V4L2 no código atual |
+| `timestamp_origin` | Origem/semântica conhecida do timestamp |
 
-## 10. Testes auxiliares e implementações experimentais
+### 9.2. Metadados e eventos
 
-Além do fluxo principal, o repositório contém implementações anteriores e ferramentas destinadas à investigação de aspectos específicos da captura.
+`src/p4.py` organiza `FrameMetadata`, incluindo `source_id`, `session_id`, `frame_index`, dimensões, formato, FPS, indicador `raw` e timestamps capturado/recebido.
 
-Esses módulos devem ser tratados separadamente do fluxo principal baseado em GStreamer. Sua presença no repositório não significa que estejam integrados ao programa principal nem que todos os testes tenham sido aprovados no ambiente atual.
+O evento de sessão é enviado ao tópico `ods.session.started`:
 
-### 10.1. Captura experimental com V4L2
+```json
+{
+  "event": "ods.session.started",
+  "source_id": "emeet",
+  "session_id": "identificador-da-sessao"
+}
+```
 
-- `src/v4l2_capture.py`: implementação de captura de baixo nível por meio de V4L2.
-- `src/capture.py`: abstração de captura e implementação `WebcamCapture` baseada no módulo V4L2.
+Os eventos por quadro são enviados ao tópico `ods.p4.frame`:
 
-Esses módulos exploram o acesso direto ao dispositivo de vídeo no Linux e o tratamento de buffers e timestamps do V4L2.
+```json
+{
+  "schema": "ods.p4.frame",
+  "producer": "P4",
+  "source_id": "emeet",
+  "session_id": "identificador-da-sessao",
+  "payload": {
+    "frame_id": 30,
+    "timestamp": 10731799672000,
+    "width": 640,
+    "height": 480,
+    "format": "MJPG",
+    "fps": 15.64,
+    "raw": false
+  }
+}
+```
 
-### 10.2. Captura simulada
+O `session_id` é gerado por execução e permite relacionar o início da sessão aos seus eventos de quadro. O Kafka recebe **um evento por quadro** no modo completo, enquanto o terminal imprime apenas um evento a cada 30 quadros.
 
-- `src/fake_capture.py`: fornece frames sintéticos para testes sem uma câmera real.
+`fps` é calculado a partir da diferença entre timestamps consecutivos quando não há FPS fixo configurado; pode ser `null` no primeiro quadro. O indicador `raw` distingue imagens brutas de sensor de formatos como o MJPEG da EMEET.
 
-A captura simulada pode ser útil para testar partes da aplicação que dependem da estrutura de um frame, mas não comprova o funcionamento de uma câmera física.
+### 9.3. Semântica temporal
 
-### 10.3. Captura experimental para IMX519
+- O `timestamp` publicado é um inteiro em **nanossegundos**, derivado do timestamp do buffer V4L2 quando seu relógio é identificado como monotônico.
+- Na EMEET, o driver apresentou `driver_soe` (*start of exposure*). Em outros drivers pode haver timestamp associado ao fim do quadro (*EOF*) ou outra origem.
+- A implementação converte o valor V4L2 de segundos e microssegundos para **unidade de nanossegundos**; isso **não cria precisão física de nanossegundos**.
+- Um timestamp monotônico **não é diretamente uma data UTC**. A opção `CONVERTER_TIMESTAMP_UTC=True` acrescenta `captured_at_utc` usando uma correspondência aproximada entre os relógios do sistema, preservando `payload.timestamp`.
+- Quando o relógio do driver não é reconhecido, a captura usa uma marca de recebimento; ela não deve ser apresentada como instante físico de exposição.
 
-- `src/imx519_capture.py`: implementação baseada em `Picamera2`, destinada à investigação da captura pela câmera IMX519.
+A validação dos timestamps das câmeras CSI continua necessária.
 
-Essa implementação ainda precisa ser validada no hardware correspondente e integrada ao fluxo principal, caso seja escolhida como parte da arquitetura final.
+### 9.4. Limitação de sincronização entre SHM e Kafka
 
-### 10.4. Ferramentas de teste
+O SHM transporta os pixels e o Kafka transporta os metadados. **O leitor `tests/shm_reader.py` ainda não recupera o `frame_id` original do buffer enviado pelo P4.** Seu contador de quadros é local.
 
-| Arquivo | Objetivo |
-|---|---|
-| `tests/teste_captura_video.py` | Avaliar captura, sequência de frames e intervalos |
-| `tests/teste_frame_drops.py` | Investigar intervalos entre frames e possíveis perdas |
-| `tests/teste_memoria.py` | Observar o consumo de memória durante a captura |
-| `tests/teste_undistort.py` | Experimentar o processamento de correção de distorção |
-| `tests/teste_v4l2_timestamp.py` | Inspecionar sequência e timestamps de buffers V4L2 |
-| `tests/coletar_calibracao.py` | Coletar imagens para um conjunto de calibração |
+Portanto, **a transmissão simultânea já foi validada, mas a associação exata imagem ↔ evento Kafka ainda não foi implementada**. A solução precisa ser alinhada com o contrato do consumidor I1, especialmente para suportar início tardio e descartes de quadros.
 
-Os testes que dependem de V4L2 utilizam a implementação experimental correspondente e podem depender do dispositivo, dos formatos suportados e das permissões do sistema.
+## 10. Primeiro teste da IMX519 na Jetson (via SSH)
 
-A coleta de imagens para calibração não calcula, por si só, a matriz intrínseca nem os coeficientes de distorção.
+**Objetivo inicial:** confirmar que o sensor e o driver entregam quadros ao V4L2 antes de depender da aplicação Python, SHM ou Kafka.
 
-Os testes auxiliares devem ser executados individualmente e ter seus resultados registrados antes de serem considerados validados. Não há garantia de que todos funcionem com a implementação principal baseada em GStreamer sem adaptações.
+### 10.1. Conferir a câmera e o dispositivo
 
-## 11. Calibração e correção de distorção
+Após conectar-se à Jetson pela rede autorizada:
 
-O arquivo `config/camera_calibration.json` contém campos para a matriz da câmera e os coeficientes de distorção utilizados por `src/undistort.py`.
+```bash
+ssh sys2@ods-pc
+```
 
-Os valores presentes atualmente são ilustrativos e não representam uma calibração real da webcam EMEET, da IMX519 ou da IMX477.
+O nome `ods-pc` deve ser acessível na rede usada; caso contrário, utilizar o endereço SSH fornecido pela equipe.
 
-A correção de distorção ainda não faz parte do fluxo principal validado. Para utilizá-la corretamente, será necessário:
+Na Jetson:
 
-1. Coletar imagens apropriadas da câmera que será utilizada.
-2. Calcular os parâmetros de calibração a partir dessas imagens.
-3. Salvar os parâmetros reais no arquivo de configuração.
-4. Aplicar a correção aos frames capturados.
-5. Verificar visualmente e quantitativamente o resultado.
-6. Atualizar os metadados para refletir o processamento efetivamente aplicado.
+```bash
+v4l2-ctl --list-devices
+ls -l /dev/video*
+v4l2-ctl -d /dev/video0 --list-formats-ext
+```
 
-Os parâmetros devem corresponder à câmera e à configuração óptica utilizadas. Não se deve reutilizar uma calibração ilustrativa ou de outra câmera como se fosse válida.
+**Não presumir que `/dev/video0` seja sempre a IMX519.** Identificar o nó correto antes de continuar.
 
-## 12. Próximos passos
+### 10.2. Testar streaming sem o P4
 
-As próximas atividades do P4 incluem:
+Se `/dev/video0` corresponder à IMX519 e anunciar `1920×1080` com `RG10`:
 
-- Consolidar e documentar os testes de captura e temporização.
-- Avaliar perdas de frames e consumo de memória no fluxo principal.
-- Definir a interface de entrega dos frames e metadados aos demais componentes ODS.
-- Implementar e validar a calibração real e a correção de distorção.
-- Investigar os requisitos temporais e a origem dos timestamps.
-- Validar a captura com a Arducam IMX519 no Raspberry Pi 4.
-- Adaptar e validar o fluxo para a plataforma Jetson.
-- Revisar as implementações experimentais e decidir quais devem ser mantidas, integradas ou removidas.
+```bash
+timeout 15s v4l2-ctl \
+  -d /dev/video0 \
+  --set-fmt-video=width=1920,height=1080,pixelformat=RG10 \
+  --stream-mmap \
+  --stream-count=5 \
+  --verbose
+```
 
-## 13. Controle de versão e arquivos gerados
+O comando tenta capturar cinco buffers e limita a duração da tentativa. **A enumeração de formatos não comprova que o sensor esteja transmitindo:** em verificações anteriores, a câmera foi reconhecida, mas o streaming apresentou timeout. Também houve indícios de problemas com driver, overlay e comunicação I²C dos sensores.
 
-O repositório utiliza `.gitignore` para evitar o versionamento de arquivos locais, como o ambiente virtual, arquivos temporários e vídeos gerados durante os testes.
+Se o V4L2 não entregar buffers, investigar primeiro a câmera, a alimentação/conexões e a configuração do driver/overlay. Não alterar a configuração de boot da Jetson apenas para fazer o teste Python.
 
-Antes de adicionar novos arquivos ao repositório, verificar se são código-fonte, configuração necessária ou artefatos gerados localmente. Conjuntos de calibração e vídeos devem ser versionados somente quando houver uma necessidade definida pelo projeto.
+### 10.3. Testar a aplicação no modo diagnóstico
+
+Depois de confirmar a captura via `v4l2-ctl`:
+
+1. Fazer `git pull` da versão revisada do P4 na Jetson, no repositório correto.
+2. Criar um ambiente Python compatível e instalar `linuxpy` (a compatibilidade da versão com o Python da Jetson ainda precisa ser verificada).
+3. Conferir `device`, `width`, `height` e `pixel_format` da IMX519 no `src/config.py`.
+4. Em `src/main.py`, selecionar `CAMERA_SELECIONADA = "imx519"` e `MODO_DIAGNOSTICO = True`.
+5. Executar:
+
+```bash
+python -m src.main
+```
+
+O resultado esperado é a captura e exibição de informações sobre os buffers, sem inicializar SHM nem Kafka. Os valores reais, especialmente tamanho do buffer, flags, timestamps e FPS, deverão ser observados na Jetson; não são resultados já validados.
+
+**A IMX477 será tratada depois da IMX519**, confirmando primeiro seu driver e dispositivo próprio. O funcionamento simultâneo das duas fontes ainda precisa ser implementado e testado.
+
+## 11. Problemas conhecidos e próximos passos
+
+- **IMX519/IMX477:** validar driver, Device Tree/overlays e entrega real de buffers V4L2 na Jetson.
+- **SHM para CSI:** adaptar a pipeline para o formato efetivamente recebido e determinar a representação que será consumida pelo I1.
+- **Sincronização:** estabelecer uma associação recuperável entre imagem SHM e `frame_id`/`session_id` Kafka.
+- **Duas câmeras:** implementar e testar captura simultânea, quando o contrato do sistema exigir.
+- **Confiabilidade:** medir drops, taxa de quadros, atraso, uso de memória e comportamento diante de falhas do Kafka ou de desconexão do consumidor.
+- **Integração:** validar os esquemas dos eventos e os requisitos temporais com a equipe.
+
+## 12. Controle de versão
+
+A pasta `.venv/`, o backup local `src_old/`, imagens temporárias (como `i1_frame.jpg`), logs e vídeos de testes não devem ser incluídos no Git. Consulte `.gitignore` antes do commit.
+
+Para revisar as alterações:
+
+```bash
+git status --short
+git diff --stat
+```
+
+Após conferir quais arquivos devem ser versionados, registrar a versão e enviar ao repositório remoto. Na Jetson, confirmar antes se a árvore de trabalho contém alterações locais importantes, para não sobrescrevê-las inadvertidamente ao atualizar o código.
 
 ---
 
-**Resumo do estado atual:** a captura contínua pela webcam EMEET via GStreamer, a emissão de metadados e a gravação em MP4 foram validadas no ambiente WSL2 utilizado no desenvolvimento. A calibração real, a integração com as demais câmeras, a validação dos testes auxiliares e a execução na plataforma Jetson continuam pendentes.
+**Resumo:** a implementação atual do P4 já captura vídeo real da EMEET com timestamps do V4L2, dispõe de modo diagnóstico independente, transmite BGR via GStreamer/SHM e publica metadados e eventos de sessão no Kafka. O próximo marco é **capturar quadros reais da IMX519 na Jetson**, começando pela validação do driver e pelo modo diagnóstico; posteriormente, adaptar a transmissão CSI, integrar a IMX477 e resolver a sincronização exata com o I1.

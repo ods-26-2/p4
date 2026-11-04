@@ -1,8 +1,12 @@
 from dataclasses import dataclass
-import numpy as np
+
 
 @dataclass
 class Frame:
-    image: np.ndarray
+    data: bytes
+    width: int
+    height: int
+    pixel_format: str
     timestamp_ns: int
-    frame_id: int
+    frame_index: int
+    timestamp_origin: str = "received"

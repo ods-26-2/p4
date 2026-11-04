@@ -1,3 +1,5 @@
+
+linuxpy==0.25.0
+confluent-kafka==2.16.1
 numpy
 opencv-python
-psutil

@@ -1,14 +1,27 @@
+
+# Ambiente virtual e arquivos Python
 .venv/
 __pycache__/
 *.pyc
+.pytest_cache/
 
+# Backup da implementação antiga
+src_old/
+
+# Dados de calibração
 data/dataset_calibracao/
 
+# Imagens geradas em testes
 frame_teste.jpg
-
-# Arquivos temporários de validação
 frame_validacao.jpg
+i1_frame.jpg
+
+# Scripts temporários
 teste_fps.py
 
 # Vídeos gerados durante os testes
 videos/
+
+# Arquivos locais
+.env
+*.log
