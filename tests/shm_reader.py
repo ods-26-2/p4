@@ -5,6 +5,8 @@ import gi
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
 
+from src.shm_protocol import ler_cabecalho
+
 Gst.init(None)
 
 
@@ -12,7 +14,7 @@ def main():
     pipeline_description = (
         "shmsrc socket-path=/tmp/p4_raw_teste_shm "
         "is-live=true do-timestamp=true "
-        "! application/x-ods-raw,format=RG10,"
+        "! application/x-ods-frame,version=1,"
         "width=1920,height=1080,storage-bits=16,framerate=0/1 "
         "! appsink name=sink sync=false "
         "max-buffers=1 drop=true"
@@ -43,8 +45,16 @@ def main():
         finally:
             buffer.unmap(mapped)
 
-        print("Bytes recebidos:", len(dados))
-        print("SHA-256:", hashlib.sha256(dados).hexdigest())
+        # Separa os metadados dos bytes RAW originais.
+        campos, inicio_raw = ler_cabecalho(dados)
+        dados_raw = dados[inicio_raw:]
+
+        print("Câmera:", campos["source_id"])
+        print("Sessão:", campos["session_id"])
+        print("Frame ID:", campos["frame_id"])
+        print("Formato:", campos["format"])
+        print("Bytes RAW recebidos:", len(dados_raw))
+        print("SHA-256 RAW:", hashlib.sha256(dados_raw).hexdigest())
 
     finally:
         pipeline.set_state(Gst.State.NULL)

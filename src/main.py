@@ -1,11 +1,13 @@
+
 import json
 import os
 
 from .v4l2_source import V4L2Source
 from .p4 import P4
 from .clock import ClockConverter
-from .events import montar_evento_frame
+from .events import montar_evento_frame, montar_evento_inicio_sessao
 from .config import CAMERAS
+
 
 # CONFIGURAÇÕES
 
@@ -60,6 +62,7 @@ def main():
         if not MODO_DIAGNOSTICO:
             from .shm_publisher import SHMPublisher
             from .kafka_publisher import KafkaPublisher
+
             publisher = SHMPublisher(
                 socket_path=config["socket_path"],
                 width=config["width"],
@@ -82,11 +85,14 @@ def main():
             else None
         )
 
+        # Monta e publica o evento de início de sessão
         def informar_inicio_sessao(evento: dict):
-            print(json.dumps(evento))
+            evento_formatado = montar_evento_inicio_sessao(evento)
+
+            print(json.dumps(evento_formatado))
 
             if kafka is not None:
-                kafka.publicar_inicio_sessao(evento)
+                kafka.publicar_inicio_sessao(evento_formatado)
 
         def receber_frame(frame, metadata):
             # Modo diagnóstico: apenas verifica a captura
@@ -104,10 +110,10 @@ def main():
 
                 return
 
-            # Modo completo: transmite o vídeo
-            publisher.publish(frame)
+            # Modo completo: transmite o pacote P4R1 pelo SHM
+            publisher.publish(frame, metadata)
 
-            # Monta os metadados
+            # Monta o evento do frame no formato B2
             evento = montar_evento_frame(metadata)
 
             if clock is not None:
@@ -116,7 +122,7 @@ def main():
                         metadata.captured_at_ns
                     )
 
-            # Publica todos os eventos no Kafka
+            # Publica o evento no Kafka, se estiver ativo
             if kafka is not None:
                 kafka.publicar_frame(evento)
 
@@ -156,23 +162,26 @@ def main():
         print(f"Erro no P4: {erro}")
 
     finally:
-
         if p4 is not None:
             print(
                 "Métricas de captura:",
                 json.dumps(p4.metrics.resumo())
             )
 
-        # Libera o vídeo e a câmera antes de aguardar o Kafka
+        # Libera o SHM e a câmera antes de aguardar o Kafka
         try:
             if publisher is not None:
-                print("Métricas de transmissão:", json.dumps(publisher.resumo()))
+                print(
+                    "Métricas de transmissão:",
+                    json.dumps(publisher.resumo())
+                )
                 publisher.release()
 
         finally:
             try:
                 if camera is not None:
                     camera.release()
+
             finally:
                 if kafka is not None:
                     kafka.release()

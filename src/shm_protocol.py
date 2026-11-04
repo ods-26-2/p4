@@ -1,0 +1,49 @@
+
+import json
+import struct
+
+from .metadata import FrameMetadata
+
+
+def criar_cabecalho(metadata: FrameMetadata, tamanho_dados: int) -> bytes:
+    campos = {
+        "source_id": metadata.source_id,
+        "session_id": metadata.session_id,
+        "frame_id": metadata.frame_index,
+        "timestamp": metadata.captured_at_ns,
+        "width": metadata.width,
+        "height": metadata.height,
+        "format": metadata.pixel_format,
+        "raw": metadata.raw,
+        "data_size": tamanho_dados
+    }
+
+    conteudo = json.dumps(campos).encode("utf-8")
+
+    return b"P4R1" + struct.pack("!I", len(conteudo)) + conteudo
+
+
+def ler_cabecalho(pacote: bytes) -> tuple[dict, int]:
+    if len(pacote) < 8 or pacote[:4] != b"P4R1":
+        raise ValueError("Identificador inválido ou cabeçalho incompleto.")
+
+    tamanho_json = struct.unpack("!I", pacote[4:8])[0]
+    inicio_raw = 8 + tamanho_json
+
+    if len(pacote) < inicio_raw:
+        raise ValueError("Cabeçalho JSON incompleto.")
+
+    campos = json.loads(pacote[8:inicio_raw].decode("utf-8"))
+
+    tamanho_declarado = campos["data_size"]
+    tamanho_recebido = len(pacote) - inicio_raw
+
+    if type(tamanho_declarado) is not int or tamanho_declarado < 0:
+        raise ValueError("Tamanho RAW declarado inválido.")
+
+    if tamanho_recebido != tamanho_declarado:
+        raise ValueError(
+            "O tamanho dos dados RAW não corresponde ao declarado."
+        )
+
+    return campos, inicio_raw
