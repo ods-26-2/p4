@@ -10,12 +10,15 @@ from .config import CAMERAS
 
 # CONFIGURAÇÕES
 
-CAMERA_SELECIONADA = "emeet"
+CAMERA_SELECIONADA = os.getenv("P4_CAMERA", "emeet")
 
 # Quantidade de quadros no modo diagnóstico
 LIMITE_QUADROS = 30
 
-MODO_DIAGNOSTICO = True 
+MODO_DIAGNOSTICO = (
+    os.getenv("P4_MODO_DIAGNOSTICO", "true").lower() == "true"
+)
+
 CONVERTER_TIMESTAMP_UTC = False
 ATIVAR_KAFKA = True
 
