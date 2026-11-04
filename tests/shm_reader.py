@@ -1,21 +1,19 @@
 
+import hashlib
 import gi
-import cv2
-import numpy as np
 
 gi.require_version("Gst", "1.0")
-gi.require_version("GstVideo", "1.0")
-
-from gi.repository import Gst, GstVideo
+from gi.repository import Gst
 
 Gst.init(None)
 
 
 def main():
     pipeline_description = (
-        "shmsrc socket-path=/tmp/p4_video_shm "
+        "shmsrc socket-path=/tmp/p4_raw_teste_shm "
         "is-live=true do-timestamp=true "
-        "! video/x-raw,format=BGR,width=640,height=480 "
+        "! application/x-ods-raw,format=RG10,"
+        "width=1920,height=1080,storage-bits=16,framerate=0/1 "
         "! appsink name=sink sync=false "
         "max-buffers=1 drop=true"
     )
@@ -23,55 +21,30 @@ def main():
     pipeline = Gst.parse_launch(pipeline_description)
     sink = pipeline.get_by_name("sink")
 
-    result = pipeline.set_state(Gst.State.PLAYING)
-
-    if result == Gst.StateChangeReturn.FAILURE:
-        raise RuntimeError("Falha ao conectar ao P4.")
-
     try:
-        for i in range(30):
-            sample = sink.emit(
-                "try-pull-sample",
-                5 * Gst.SECOND
-            )
+        resultado = pipeline.set_state(Gst.State.PLAYING)
 
-            if sample is None:
-                raise RuntimeError(
-                    "Nenhum quadro recebido do P4."
-                )
+        if resultado == Gst.StateChangeReturn.FAILURE:
+            raise RuntimeError("Falha ao iniciar leitor SHM.")
 
-            buffer = sample.get_buffer()
+        sample = sink.emit("try-pull-sample", 5 * Gst.SECOND)
 
-            info = GstVideo.VideoInfo.new_from_caps(sample.get_caps())
-            if info is None:
-                raise RuntimeError("Formato inválido.")
+        if sample is None:
+            raise RuntimeError("Nenhum quadro recebido.")
 
-            success, mapped = buffer.map(Gst.MapFlags.READ)
+        buffer = sample.get_buffer()
+        sucesso, mapped = buffer.map(Gst.MapFlags.READ)
 
-            if not success:
-                raise RuntimeError("Falha ao ler quadro.")
+        if not sucesso:
+            raise RuntimeError("Falha ao acessar os bytes.")
 
-            try:
-                image = np.ndarray(
-                    shape=(info.height, info.width, 3),
-                    dtype=np.uint8,
-                    buffer=mapped.data,
-                    strides=(info.stride[0], 3, 1)
-                ).copy()
-            finally:
-                buffer.unmap(mapped)
+        try:
+            dados = bytes(mapped.data)
+        finally:
+            buffer.unmap(mapped)
 
-            if i == 0:
-                if not cv2.imwrite("i1_frame.jpg", image):
-                    raise RuntimeError("Falha ao salvar imagem.")
-
-            if i % 10 == 0:
-                print(
-                    f"I1 recebeu quadro {i}: "
-                    f"{info.width}x{info.height}"
-                )
-
-        print("Recepção de vídeo funcionando!")
+        print("Bytes recebidos:", len(dados))
+        print("SHA-256:", hashlib.sha256(dados).hexdigest())
 
     finally:
         pipeline.set_state(Gst.State.NULL)

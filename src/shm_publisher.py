@@ -30,18 +30,18 @@ class SHMPublisher:
                 "Verifique se há outro P4 ativo ou um socket antigo."
             )
 
+
         pipeline_description = (
             "appsrc name=source is-live=true "
             "format=time do-timestamp=true block=true "
-            f"caps=image/jpeg,width={width},height={height},"
-            "framerate=0/1 "
-            "! jpegdec "
-            "! videoconvert "
-            f"! video/x-raw,format=BGR,width={width},height={height} "
+            f"caps=application/x-ods-raw,format=RG10,"
+            f"width={width},height={height},"
+            "storage-bits=16,framerate=0/1 "
             f"! shmsink socket-path={socket_path} "
-            "shm-size=8000000 "
+            "shm-size=33554432 "
             "wait-for-connection=false sync=false"
         )
+
 
         self.pipeline = Gst.parse_launch(pipeline_description)
         self.source = self.pipeline.get_by_name("source")
@@ -53,8 +53,8 @@ class SHMPublisher:
             raise RuntimeError("Falha ao iniciar o SHM Publisher.")
 
     def publish(self, frame: Frame) -> None:
-        if frame.pixel_format != "MJPG":
-            raise ValueError("O publicador espera quadros MJPEG.")
+        if frame.pixel_format != "RG10":
+            raise ValueError("O publicador espera quadros RG10 (10-bit raw).")
 
         if (frame.width, frame.height) != (self.width, self.height):
             raise ValueError("Resolução diferente da configurada.")

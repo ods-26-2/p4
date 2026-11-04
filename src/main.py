@@ -1,4 +1,3 @@
-
 import json
 import os
 
@@ -10,7 +9,7 @@ from .config import CAMERAS
 
 # CONFIGURAÇÕES
 
-CAMERA_SELECIONADA = os.getenv("P4_CAMERA", "emeet")
+CAMERA_SELECIONADA = os.getenv("P4_CAMERA", "imx519")
 
 # Quantidade de quadros no modo diagnóstico
 LIMITE_QUADROS = 30
@@ -45,7 +44,8 @@ def main():
             device=config["device"],
             width=config["width"],
             height=config["height"],
-            pixel_format=config["pixel_format"]
+            pixel_format=config["pixel_format"],
+            sensor_mode=config.get("sensor_mode")
         )
 
         # Inicializa o P4
