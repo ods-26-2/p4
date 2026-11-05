@@ -1,21 +1,24 @@
 # SIS-2 — P4: Fonte de Vídeo
-**Projeto ODS 2026/2 · Componente P4 · Squad SIS-2 (Sinal e Dispositivo)**  
+
+**Projeto ODS 2026/2 · Componente P4 · Squad SIS-2 (Sinal e Dispositivo)**
 
 **Estado documentado:** 05/11/2026 · **Plataforma de validação atual:** NVIDIA Jetson Orin, Ubuntu 22.04 / JetPack R36.4.7
 
 O **P4** fornece quadros e metadados de vídeo para outros componentes do ODS. Há duas fontes selecionáveis por variável de ambiente:
 
 - **Câmera CSI:** captura das **IMX519** e **IMX477** por V4L2/LinuxPy, preservando os bytes brutos `RG10` (Bayer RAW10) da imagem.
+
 - **Câmera simulada por arquivo:** decodifica um vídeo MP4 com OpenCV e entrega os quadros `BGR8` no ritmo de reprodução do arquivo. O teste atual utiliza `cars_extended.mp4` a `640 × 360`, com FPS informado de `60`.
 
 As duas fontes seguem a mesma interface `VideoSource` e alimentam o mesmo componente `P4`. O componente publica dados e eventos por canais distintos:
 
 - **GStreamer + memória compartilhada (SHM):** um pacote identificado por `P4R1` por frame, com cabeçalho JSON e bytes da imagem (`RG10` ou `BGR8`).
+
 - **Apache Kafka (opcional):** eventos leves `ods.session.started` e `ods.p4.frame`, **sem transportar os pixels**.
 
 O **modo diagnóstico** lê 30 quadros sem iniciar SHM ou Kafka. O **modo completo** transmite pelo SHM e, se habilitado, publica os metadados no Kafka.
 
-> **Estado real em 05/11/2026:** IMX519 e IMX477 validadas **individualmente** na Jetson (`1920 × 1080`, `RG10`). Fonte MP4 validada pelo `main.py` (`640 × 360`, `BGR8`): **900 frames processados**, **900 buffers aceitos pelo `appsrc`** e leitura independente do **frame 219** com **691.200 bytes** e timestamp de reprodução. **20 testes automatizados passaram**. Permanecem pendentes a integração com um consumidor real do ODS (I7), a publicação Kafka confirmada no broker compartilhado, a execução simultânea das CSI e os testes prolongados de estabilidade.
+> **Estado real em 05/11/2026:** IMX519 e IMX477 validadas **individualmente** na Jetson (`1920 × 1080`, `RG10`). Fonte MP4 validada pelo `main.py` (`640 × 360`, `BGR8`): **900 frames processados**, **900 buffers aceitos pelo `appsrc`** e leitura independente do **frame 219** com **691.200 bytes** e timestamp de reprodução. **20 testes automatizados passaram**. Além disso, **dois consumidores simultâneos** da IMX519 receberam os mesmos 30 frames consecutivos (`12493` a `12522`), sem saltos observados. Permanecem pendentes a integração com um consumidor real do ODS (I7), a publicação Kafka confirmada no broker compartilhado, a execução simultânea das CSI e os testes prolongados de estabilidade.
 
 ## 1. Arquitetura
 
@@ -44,10 +47,10 @@ O **modo diagnóstico** lê 30 quadros sem iniciar SHM ou Kafka. O **modo comple
     SHM local /tmp/...          Broker e consumidores
            |
            v
-   Leitor SHM / I7 (pendente de integração real)
+   Um ou mais leitores SHM na Jetson (I7: integração real pendente)
 ```
 
-**Atenção:** o SHM funciona **localmente, na mesma máquina**. Um consumidor em outro computador não lê diretamente `/tmp/p4_file_shm` ou os sockets CSI da Jetson. No caso das câmeras CSI, P4 **não** realiza demosaicing, calibração ou correção de distorção; o consumidor precisa interpretar os dados `RG10`. A fonte MP4, por sua vez, **decodifica** o vídeo comprimido e disponibiliza pixels `BGR8`, sem transformá-los em RAW10.
+**Atenção:** o SHM funciona **localmente, na mesma máquina**. Há **um socket por fonte**, não por aplicativo: dois leitores podem conectar ao mesmo fluxo sem reabrir a câmera. Esse compartilhamento foi comprovado em um teste curto com a IMX519. Um consumidor em outro computador não lê diretamente `/tmp/p4_file_shm` ou os sockets CSI da Jetson. No caso das câmeras CSI, P4 **não** realiza demosaicing, calibração ou correção de distorção; o consumidor precisa interpretar os dados `RG10`. A fonte MP4, por sua vez, **decodifica** o vídeo comprimido e disponibiliza pixels `BGR8`, sem transformá-los em RAW10.
 
 ## 2. Estado de implementação
 
@@ -63,8 +66,9 @@ O **modo diagnóstico** lê 30 quadros sem iniciar SHM ou Kafka. O **modo comple
 | Eventos `ods.session.started` e `ods.p4.frame` | **Implementados**; gerados em JSON para câmera CSI e MP4. |
 | Fonte MP4 (`VideoFileSource`) | **Validada** com `cars_extended.mp4` por OpenCV, simulação de ~60 FPS e seleção por `P4_SOURCE=file`. |
 | SHM do MP4 para leitor independente | **Validado** com o `main.py`: leitor recebeu frame 219, `BGR8`, 691.200 bytes e timestamp de reprodução. |
+| Dois consumidores simultâneos da IMX519 | **Validado em teste curto**: dois processos receberam 30 frames cada, IDs `12493` a `12522`, na mesma sessão e sem saltos observados. |
 | Kafka no código | **Implementado**, com callbacks de confirmação, tratamento de falhas e testes simulados. |
-| Kafka compartilhado na Jetson | **Pendente de teste de publicação/consumo confirmado**. Contratos e tópicos devem ser alinhados com TRA-1/Rafael. |
+| Kafka compartilhado na Jetson | **Broker acessível** em `172.18.4.56:9092`, ID `1`, após autorização do professor para iniciar o contêiner. Na consulta, não havia tópicos e a criação automática estava habilitada. **Publicação e consumo reais do P4 ainda não validados**; aguardar alinhamento dos nomes dos tópicos. |
 | Timestamps do driver | **Conversão opcional implementada e testada**: TSC → `CLOCK_MONOTONIC_RAW` na IMX477 e IMX519; origem `driver_eof` observada. O salto inicial ocasional ainda não foi explicado. |
 | Execução simultânea de IMX519 e IMX477 | **Não validada**. |
 | Integração com consumidor real (I7/outros) | **Pendente**. |
@@ -72,6 +76,7 @@ O **modo diagnóstico** lê 30 quadros sem iniciar SHM ou Kafka. O **modo comple
 | Testes automatizados | **20 testes aprovados** em 05/11/2026, incluindo timestamps de reprodução MP4 em eventos e SHM. |
 
 ### 2.1. Resultados obtidos na Jetson
+
 Em testes do **modo completo com Kafka desativado**, usando **120 quadros por execução**:
 
 | Câmera | Frames capturados | Buffers aceitos pelo `appsrc` | Perdas estimadas | FPS médio informado |
@@ -106,6 +111,23 @@ O intervalo entre os eventos de frame impressos a cada 30 quadros foi próximo d
 
 **Limite da evidência:** 900 buffers aceitos pelo `appsrc` não comprovam entrega ou consumo de todos os 900 quadros. O leitor independente validou **um quadro real recebido**. A integração com o consumidor I7 ainda precisa ser realizada.
 
+### 2.3. Dois consumidores simultâneos da IMX519
+
+Em 05/11/2026, **uma única instância do P4** manteve a IMX519 aberta e publicou `RG10` em `/tmp/p4_imx519_shm`. Dois processos leitores independentes foram iniciados em paralelo, conectados ao **mesmo socket SHM**.
+
+| Indicador | Leitor A | Leitor B |
+| --- | --- | --- |
+| Frames recebidos | 30 | 30 |
+| Primeiro / último ID | `12493` / `12522` | `12493` / `12522` |
+| Saltos observados | 0 | 0 |
+| Sessão | `ce8dbe90-f97c-4693-bddc-918a63dac411` | Mesma sessão |
+| Formato | `RG10`, 1920 × 1080 | `RG10`, 1920 × 1080 |
+| Código de saída | 0 | 0 |
+
+Em um teste anterior de um único frame por leitor, ambos receberam o **frame 4689** da mesma sessão, com **4.147.200 bytes** e hashes SHA-256 iguais. Os resultados indicam que o SHM atual permite compartilhar a captura com dois consumidores, **sem abrir `/dev/video1` duas vezes**.
+
+**Limites:** foram testados apenas dois leitores por períodos curtos. O teste não comprova que consumidores lentos, múltiplas equipes sob carga pesada ou execuções prolongadas receberão todos os frames sem descarte ou impacto de desempenho. O leitor temporário de 30 frames foi usado fora do repositório (`/tmp/p4_reader_30.py`); não faz parte da suíte automatizada.
+
 ## 3. Câmeras e configuração atual
 
 As definições estão em [`src/config.py`](src/config.py):
@@ -137,18 +159,20 @@ A implementação `src/video_file_source.py` utiliza OpenCV (`cv2.VideoCapture`)
 O `main.py` seleciona o socket `/tmp/p4_file_shm` para essa fonte, possui `source_id` derivado do nome do arquivo (por exemplo, `file_cars_extended`) e define `raw=False`. O vídeo é reproduzido **uma vez**; no fim, o `main.py` trata `StopIteration` como encerramento normal. Não existe loop automático.
 
 ### 3.2. Representação dos bytes RAW10
+
 `RG10` representa dados brutos de um sensor com **mosaico Bayer**, não uma imagem RGB pronta. Nas capturas atuais, cada quadro `1920 × 1080` possui **4.147.200 bytes** (2 bytes por pixel, usados como contêiner para amostras de 10 bits). O consumidor precisa interpretar corretamente a disposição das amostras e a matriz Bayer para obter uma imagem visualizável.
 
 **Não** trate esses bytes como JPEG, PNG ou `RGB888`, nem tente exibi-los diretamente como `video/x-raw` convencional. O protocolo de SHM usa caps personalizados: `application/x-ods-frame`.
 
 ## 4. Dependências e preparação
+
 Requisitos do ambiente validado:
 
 - Jetson Orin com acesso às câmeras CSI pelo V4L2 (para o modo CSI); a fonte por arquivo funciona sem as câmeras.
 
 - Python 3.10 ou outra versão compatível com as bibliotecas instaladas no dispositivo.
 
-- Dependências Python utilizadas: `linuxpy`, `confluent-kafka` e, para MP4, `opencv-python-headless` e `numpy`. **Confira a correspondência com o `requirements.txt` antes do commit**; não instale simultaneamente `opencv-python` e `opencv-python-headless` no mesmo ambiente.
+- Dependências Python declaradas no `requirements.txt`: `linuxpy==0.25.0`, `confluent-kafka==2.16.1`, `numpy==2.2.6` e `opencv-python-headless==5.0.0.93`. Evite instalar simultaneamente `opencv-python` e `opencv-python-headless` na mesma `venv`.
 
 - GStreamer com `appsrc`, `shmsink`, `shmsrc`, `appsink` e bindings Python `gi` / PyGObject.
 
@@ -173,7 +197,7 @@ sudo apt install -y \
   v4l-utils gcc
 ```
 
-Para clonar e instalar as dependências Python (após conferir/atualizar o `requirements.txt`):
+Para clonar e instalar as dependências Python:
 
 ```bash
 git clone https://github.com/ods-26-2/p4.git
@@ -199,9 +223,10 @@ gst-inspect-1.0 shmsrc
 
 > O `PYTHONPATH` acima reflete o **ambiente da Jetson testada**. Em outros sistemas, o caminho dos pacotes de sistema pode ser diferente. Não é necessário instalar ou iniciar um broker Kafka para testar **somente o SHM**.
 
-**Dependência testada para a fonte MP4 na Jetson:** `opencv-python-headless==5.0.0.93`, `numpy==2.2.6`, instalados na `venv` existente. A instalação foi feita com `python -m pip install opencv-python-headless`. Essa evidência **não garante** que as versões atualmente declaradas em `requirements.txt` sejam as mesmas; revise o arquivo e a compatibilidade com outras dependências antes de fixá-las.
+**Dependências testadas na Jetson:** `opencv-python-headless==5.0.0.93` e `numpy==2.2.6`, agora declaradas no `requirements.txt`. O comando `python -m pip check` não encontrou conflitos, e os 20 testes automatizados foram aprovados. Isso não substitui testes de instalação em outras máquinas.
 
 ### 4.1. Compilar o conversor de relógios TSC (opcional)
+
 Na Jetson AArch64, a partir da raiz do repositório:
 
 ```bash
@@ -215,9 +240,11 @@ A classe `src/tsc_converter.py` acessa a biblioteca via `ctypes`. A medição do
 A normalização só deve ser habilitada para as câmeras CSI verificadas (**IMX477** e **IMX519**) na Jetson testada. Os testes curtos indicaram diferenças estimadas de captura → leitura de cerca de **14–16 ms** para IMX477 e **20–22 ms** para IMX519, mas **não são uma calibração absoluta de latência** nem garantem sincronização com o áudio. A precisão e a estabilidade em sessões longas ainda precisam de avaliação.
 
 ## 5. Executando o P4
+
 Execute os comandos **na raiz do repositório**, com o ambiente virtual ativo.
 
 ### 5.1. Variáveis de ambiente
+
 | Variável | Valor padrão atual | Função |
 | --- | --- | --- |
 | `P4_SOURCE` | `camera` | `camera`: CSI; `file`: vídeo por arquivo. |
@@ -232,6 +259,7 @@ Execute os comandos **na raiz do repositório**, com o ambiente virtual ativo.
 O modo diagnóstico permanece limitado a **30 quadros**, independentemente de `P4_FRAME_LIMIT`. A opção `P4_NORMALIZAR_TSC=true` aplica-se **somente às câmeras CSI validadas** e exige compilar previamente `bash scripts/build_tsc_clock.sh`. Para o MP4, o P4 fornece o timestamp de reprodução em `received_at_monotonic_raw_ns` mesmo sem normalização TSC. No modo completo, Kafka está **ativado por padrão**: configure `P4_ATIVAR_KAFKA=false` para executar localmente apenas com SHM.
 
 ### 5.2. Modo diagnóstico — somente captura
+
 **IMX519:**
 
 ```bash
@@ -260,6 +288,7 @@ python -m src.main
 Nesse modo, o P4 exibe periodicamente a diferença **estimada** entre captura e leitura em `CLOCK_MONOTONIC_RAW`. Ambas as câmeras foram testadas nessa condição, com cerca de 60 FPS em execuções de 30 frames.
 
 ### 5.3. Modo completo — SHM sem Kafka
+
 **IMX519 — teste limitado a 120 quadros:**
 
 ```bash
@@ -289,6 +318,7 @@ O programa abre a câmera selecionada, publica pacotes P4R1 no socket configurad
 Se quiser conectar um leitor em outro terminal, **120 quadros duram aproximadamente 2 segundos**. Use um limite maior, por exemplo `P4_FRAME_LIMIT=600` (cerca de 10 segundos), ou omita o limite e finalize depois com `Ctrl+C`.
 
 ### 5.4. Modo completo — SHM + Kafka
+
 **Somente após confirmar os tópicos e contratos com TRA-1/Rafael**, configure um broker autorizado:
 
 ```bash
@@ -339,6 +369,7 @@ O `P4_VIDEO_PATH` pode apontar para outro arquivo compatível com `cv2.VideoCapt
 ## 6. Como outra equipe pode receber os quadros pelo SHM
 
 ### 6.1. Interface de transporte
+
 O publicador usa, entre outros parâmetros:
 
 ```text
@@ -350,9 +381,10 @@ appsrc
 
 O socket varia conforme a fonte. Para MP4, a caps correspondente é `application/x-ods-frame,version=1,width=640,height=360,storage-bits=24,framerate=0/1`, em `/tmp/p4_file_shm`. Cada **buffer GStreamer** contém **um pacote P4R1 completo**: cabeçalho JSON e bytes de um quadro (`RG10` ou `BGR8`). Os sockets só existem durante a execução do publicador (salvo resíduos de encerramento anormal).
 
-O consumidor deve utilizar `shmsrc` e `appsink` para acessar os bytes, depois validar e interpretar o pacote conforme a próxima seção.
+O consumidor deve utilizar `shmsrc` e `appsink` para acessar os bytes, depois validar e interpretar o pacote conforme a próxima seção. **Uma mesma fonte pode atender mais de um consumidor ao mesmo tempo**, conforme o teste da seção 2.3.
 
 ### 6.2. Testar a recepção com `tests/shm_reader.py`
+
 O arquivo [`tests/shm_reader.py`](tests/shm_reader.py) é um **leitor de validação**, não um decodificador de imagem. Ele recebe **um pacote**, interpreta o cabeçalho e imprime `source_id`, `session_id`, `frame_id`, formato, quantidade de bytes RAW e hash SHA-256.
 
 Esse leitor de teste seleciona as **câmeras CSI** automaticamente por `P4_CAMERA`, consultando [`src/config.py`](src/config.py). Para a fonte MP4, foi utilizado um consumidor independente conectado a `/tmp/p4_file_shm`; **não presuma que `tests/shm_reader.py` já tenha seleção por `P4_SOURCE=file`**.
@@ -433,7 +465,16 @@ PY
 
 No teste executado, esse fluxo recebeu o **frame 219**, leu `691.200` bytes e encontrou o campo `received_at_monotonic_raw_ns`. **Isso não comprova entrega integral dos 900 quadros.**
 
-### 6.3. Como obter uma imagem visualizável
+### 6.3. Compartilhamento do mesmo socket por aplicativos diferentes
+
+**Estratégia recomendada: um socket por fonte de vídeo.** Exemplo: o P4 abre a IMX519 **uma vez** e publica em `/tmp/p4_imx519_shm`; dois aplicativos, como I7 e outro componente, podem criar seus próprios `shmsrc` apontando para esse socket. Cada aplicativo processa os bytes recebidos de maneira independente. Não é necessário criar uma segunda instância do P4 para a mesma câmera.
+
+A validação prática ocorreu com dois leitores simultâneos que receberam a **mesma sequência de 30 frames** (`12493`–`12522`) sem saltos observados. Houve também confirmação de hashes iguais para o mesmo frame em um teste de leitura única. **Isso demonstra interoperabilidade básica, não entrega garantida a consumidores lentos**. Filas do `appsink`, velocidade do consumidor e backpressure precisam ser avaliados na integração real.
+
+A fonte MP4 atualmente utiliza um socket **fixo**: `/tmp/p4_file_shm`. Assim, **não é seguro iniciar dois produtores de MP4 independentes ao mesmo tempo nesse mesmo caminho**. Para reproduzir vários MP4 simultaneamente, será necessário configurar sockets distintos por fonte. Esse ajuste ainda não foi implementado.
+
+### 6.4. Como obter uma imagem visualizável
+
 O P4R1 **não transporta PNG ou JPG**. A interpretação depende de `format` no cabeçalho. Para a **fonte CSI (`RG10`)**, o consumidor precisa:
 
 1. Ler o pacote completo do `appsink`.
@@ -451,6 +492,7 @@ O P4R1 **não transporta PNG ou JPG**. A interpretação depende de `format` no 
 Para a **fonte MP4 (`BGR8`)**, cada quadro possui três canais de 8 bits em ordem **B, G, R**. O consumidor pode reconstruir a imagem com `numpy.frombuffer(dados, dtype="uint8").reshape(height, width, 3)` e convertê-la conforme a necessidade. Não é necessário demosaicing Bayer nesse caso. O exemplo de leitura fornecido acima **não** abre uma janela de visualização nem salva imagens.
 
 ## 7. Protocolo P4R1 — identificação dos quadros
+
 A serialização fica em [`src/shm_protocol.py`](src/shm_protocol.py).
 
 Formato de cada buffer:
@@ -513,6 +555,7 @@ assert len(dados_frame) == campos["data_size"]
 A função rejeita identificadores incorretos, cabeçalhos incompletos e inconsistências entre o tamanho declarado e o recebido, para qualquer formato de pixels aceito. **O protocolo P4R1 ainda é uma interface de integração proposta pelo P4:** é necessário formalizar sua adoção com os consumidores. A ordem de chegada dos eventos Kafka não substitui a identificação por `session_id` + `source_id` + `frame_id`.
 
 ## 8. Eventos Kafka e metadados
+
 Os eventos são montados em [`src/events.py`](src/events.py), e a publicação está em [`src/kafka_publisher.py`](src/kafka_publisher.py).
 
 | Evento | Tópico usado no código | Quando ocorre |
@@ -573,6 +616,7 @@ O produtor Kafka possui contadores de mensagens **enfileiradas**, **confirmadas*
 ## 9. Testes
 
 ### 9.1. Testes automatizados
+
 Na raiz do projeto, com `venv` ativado:
 
 ```bash
@@ -584,6 +628,7 @@ Na última execução registrada em **05/11/2026, 20 testes foram aprovados**. A
 > Use **`test_*.py`**, não `teste_*.py`: há scripts legados que não fazem parte da suíte atual. Esses testes são complementares aos testes físicos de câmeras, SHM, Kafka e consumidores reais.
 
 ### 9.2. Evidências e limites
+
 Já foram realizados testes de:
 
 - Captura das duas CSI **individualmente**, em modo diagnóstico e completo.
@@ -601,27 +646,32 @@ Já foram realizados testes de:
 - Normalização opcional TSC → `CLOCK_MONOTONIC_RAW` nas câmeras IMX477 e IMX519, em testes diagnósticos de 30 frames; testes unitários dos novos campos no SHM e nos eventos.
 
 - Reprodução do arquivo MP4 como câmera simulada, com `main.py`, 900 frames e publicação para `appsrc`.
-- Recebimento independente de um pacote P4R1 `BGR8` do MP4 (frame 219), com validação de formato, tamanho e timestamp de reprodução.
 
-**Ainda faltam:** teste end-to-end com broker Kafka autorizado na Jetson, interoperabilidade formal com o I7, duas CSI em paralelo, teste prolongado, memória, backpressure e recuperação após falhas.
+- Recebimento independente de um pacote P4R1 `BGR8` do MP4 (frame 219), com validação de formato, tamanho e timestamp de reprodução.
+- Dois consumidores simultâneos do mesmo socket da IMX519: 30 frames consecutivos por leitor, mesmos IDs `12493`–`12522` e zero saltos observados. Em teste separado, ambos receberam o mesmo frame 4689 com hash SHA-256 idêntico.
+- Conexão ao broker Kafka em `172.18.4.56:9092` e consulta de metadados concluída; a publicação real ainda está pendente.
+
+**Ainda faltam:** teste end-to-end de publicação/consumo dos eventos do P4 no broker Kafka, interoperabilidade formal com o I7, duas CSI em paralelo, teste prolongado com múltiplos consumidores, memória, backpressure e recuperação após falhas.
 
 ## 10. Problemas conhecidos e próximos passos da Sprint 3
+
 1. **Contrato de timestamps e sincronização com P5:** acordar relógio comum, nomenclatura e semântica de timestamp original versus normalizado. A conversão TSC → `CLOCK_MONOTONIC_RAW` está implementada e testada localmente, mas a sincronização de áudio e vídeo **não está homologada**.
 
 2. **Contrato de eventos:** confirmar com TRA-1/Rafael os tópicos, a versão do schema B2 e a aceitação dos campos opcionais `timestamp_monotonic_raw_ns` e `timestamp_monotonic_raw_clock` pelos consumidores.
 
-3. **Kafka integrado:** validar a publicação real e a confirmação de entrega em broker autorizado, sem enviar pixels ao Kafka.
+3. **Kafka integrado:** o contêiner foi iniciado com autorização do professor e o broker responde em `172.18.4.56:9092`. Ainda falta validar a criação/alinhamento de tópicos, a publicação real, a confirmação de entrega e o consumo, sem enviar pixels ao Kafka.
 
 4. **Consumidor real de vídeo:** conectar I7 ou outro componente do ODS ao SHM. Os leitores de teste já recebem pacotes RAW10 e BGR8, mas isso **não substitui** a homologação com o consumidor real.
 
 5. **Duas câmeras:** validar IMX519 e IMX477 simultaneamente com sockets separados e métricas independentes.
 
-6. **Estabilidade:** executar testes prolongados de FPS, memória, backpressure, reconexão e recuperação após falhas.
+6. **Estabilidade e múltiplos consumidores:** dois leitores já receberam 30 frames simultâneos sem saltos; executar testes prolongados com consumidores de diferentes velocidades, monitorando FPS, memória, backpressure, reconexão e recuperação após falhas.
 
 7. **Descontinuidade inicial ocasional:** em uma execução do `main.py`, os timestamps do driver saltaram **83,331 ms** entre os frames 1 e 2, enquanto as leituras ficaram próximas de 17 ms. O FPS médio relatado chegou a aproximadamente 58 FPS, mas o teste isolado de 120 frames com TSC e SHM marcou 60 FPS. **Não foi comprovada perda contínua de 2 FPS; o problema não bloqueia a entrega funcional atual.**
 
 8. **Fonte MP4 e contrato com o I7:** confirmar se o I7 consegue ler `P4R1`/BGR8 (`640 × 360`) ou se é necessário um adaptador de formato/resolução. A publicação no SHM já foi comprovada, mas o consumidor I7 ainda não foi testado.
-9. **Versionamento:** revisar o `requirements.txt` e documentar OpenCV, testes MP4 e comandos de execução antes do push.
+
+9. **Próxima melhoria opcional:** configurar sockets distintos por fonte MP4 caso haja necessidade de reproduzir vários arquivos ao mesmo tempo; o socket `/tmp/p4_file_shm` continua compartilhado entre todas as execuções por arquivo.
 
 O P4 é um componente de **aquisição de vídeo**. A correção de distorção e o desenvolvimento do consumidor real não fazem parte da implementação do P4, mas exigem alinhamento de interface. A fonte por arquivo é uma **simulação de entrada** útil para testes de integração com vídeos gravados.
 
@@ -668,23 +718,21 @@ p4/
 
 **Arquivos locais:** `venv/`, `build/`, sockets, dados RAW capturados e credenciais **não devem ser versionados**. O `.gitignore` atual ignora `/build/`; confira também que o diretório do ambiente virtual `venv/` permaneça excluído antes do commit.
 
-## 12. Preparação para compartilhar o repositório
+## 12. Versionamento e atualização da documentação
 
-As alterações atuais para a **fonte simulada** incluem `src/video_file_source.py`, `src/main.py`, `src/p4.py`, `src/shm_publisher.py`, `src/shm_protocol.py`, `src/events.py` e `tests/test_file_playback.py`, além da documentação e da revisão necessária em `requirements.txt`. O código TSC e os testes anteriores já estavam versionados.
+A câmera simulada, os novos metadados, a documentação e as dependências foram publicados no repositório [`ods-26-2/p4`](https://github.com/ods-26-2/p4), branch `main`, no commit **`1ca3faf`** (`feat(p4): adiciona camera simulada por arquivo MP4`). O push foi confirmado em 05/11/2026. O teste de dois consumidores simultâneos ocorreu **depois desse commit** e está sendo registrado nesta atualização do README.
+
+Para verificar as alterações e validar a próxima atualização:
 
 ```bash
-# Conferir arquivos modificados e possíveis artefatos locais
 git status --short
-# Conferir formatação básica
 git diff --check
-# Executar os testes atuais
 python -m unittest discover -s tests -p 'test_*.py' -v
-# Conferir arquivos a serem enviados antes de commitar
 git diff --stat
 ```
 
-Revise e versione os arquivos alterados, incluindo `README.md`, `requirements.txt` após conferência, `src/video_file_source.py` e `tests/test_file_playback.py`. Não inclua a biblioteca compilada `build/libp4_tsc_clock.so`, ambientes virtuais, sockets, quadros RAW ou credenciais. **As funcionalidades descritas como locais e testadas não devem ser anunciadas como publicadas no GitHub até o push ser concluído.**
+Não versione `venv/`, `build/libp4_tsc_clock.so`, sockets SHM, vídeos locais de teste, bytes RAW, logs temporários nem credenciais. Os logs e o leitor temporário de 30 frames em `/tmp` serviram como evidência manual e **não estão incluídos no repositório**.
 
 ---
 
-**Resumo para integração:** o P4 oferece **duas fontes** selecionáveis (`P4_SOURCE=camera` para IMX519/IMX477 em RG10 e `P4_SOURCE=file` para vídeo MP4 em BGR8). Ambas entregam pacotes P4R1 identificados pelo SHM local da Jetson, e os eventos JSON de metadados são montados sem incluir os pixels. A fonte MP4 foi validada pelo `main.py` com 900 frames e um consumidor independente recebeu o frame 219 com timestamp de reprodução. **A homologação do contrato com I7, a sincronização com P5, a execução simultânea das CSI e a entrega Kafka fim a fim ainda estão pendentes.**
+**Resumo para integração:** o P4 oferece **duas fontes** selecionáveis (`P4_SOURCE=camera` para IMX519/IMX477 em RG10 e `P4_SOURCE=file` para vídeo MP4 em BGR8). Ambas entregam pacotes P4R1 identificados pelo SHM local da Jetson, e os eventos JSON de metadados são montados sem incluir os pixels. A fonte MP4 foi validada pelo `main.py` com 900 frames e um consumidor independente recebeu o frame 219 com timestamp de reprodução. Dois leitores simultâneos da IMX519 receberam os mesmos 30 frames consecutivos sem saltos observados. **A homologação do contrato com I7, a sincronização com P5, a execução simultânea das CSI e a entrega Kafka fim a fim ainda estão pendentes.**
