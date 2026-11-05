@@ -57,8 +57,19 @@ class P4:
                     CLOCK_MONOTONIC_RAW
                 )
 
+        elif frame.timestamp_origin == "file_playback_raw":
+            # O timestamp representa a reprodução do arquivo,
+            # não a captura física original do vídeo.
+            captured_at_ns = None
+
+            # Mantém o campo legado na base CLOCK_MONOTONIC
+            received_at_ns = monotonic_ns()
+
+            # Preserva o instante de reprodução em MONOTONIC_RAW
+            received_at_monotonic_raw_ns = frame.timestamp_ns
+
         else:
-            # Mantém o comportamento atual das outras fontes
+            # Mantém o comportamento das demais fontes
             captured_at_ns = None
             received_at_ns = frame.timestamp_ns
 

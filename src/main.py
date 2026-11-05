@@ -4,6 +4,7 @@ import os
 
 from pathlib import Path
 
+from .video_file_source import VideoFileSource
 from .tsc_converter import TSCClockConverter
 from .v4l2_source import V4L2Source
 from .p4 import P4
@@ -12,9 +13,16 @@ from .events import montar_evento_frame, montar_evento_inicio_sessao
 from .config import CAMERAS
 
 
+# ============================================================
 # CONFIGURAÇÕES
+# ============================================================
 
 CAMERA_SELECIONADA = os.getenv("P4_CAMERA", "imx519")
+
+# "camera": câmera CSI (IMX519 ou IMX477)
+# "file": arquivo de vídeo simulando uma câmera
+TIPO_FONTE = os.getenv("P4_SOURCE", "camera").lower()
+CAMINHO_VIDEO = os.getenv("P4_VIDEO_PATH")
 
 # Quantidade de quadros no modo diagnóstico
 LIMITE_QUADROS = 30
@@ -41,20 +49,55 @@ KAFKA_SERVIDOR = os.getenv(
 )
 
 
+# ============================================================
+# PROGRAMA PRINCIPAL
+# ============================================================
+
 def main():
-    camera = None
+    fonte = None
     publisher = None
     kafka = None
     p4 = None
 
-    config = CAMERAS[CAMERA_SELECIONADA]
+    # --------------------------------------------------------
+    # 1. Validação da fonte selecionada
+    # --------------------------------------------------------
 
-    if not config["enabled"]:
-        print(f"Câmera {CAMERA_SELECIONADA} desabilitada.")
+    if TIPO_FONTE == "camera":
+        config = CAMERAS.get(CAMERA_SELECIONADA)
+
+        if config is None:
+            print(
+                f"Câmera desconhecida: {CAMERA_SELECIONADA}"
+            )
+            return
+
+        if not config["enabled"]:
+            print(
+                f"Câmera {CAMERA_SELECIONADA} desabilitada."
+            )
+            return
+
+    elif TIPO_FONTE == "file":
+        if not CAMINHO_VIDEO:
+            print(
+                "Configure P4_VIDEO_PATH para utilizar um vídeo."
+            )
+            return
+
+        config = None
+
+    else:
+        print(
+            f"Tipo de fonte desconhecido: {TIPO_FONTE}"
+        )
         return
 
     try:
-        # Define o limite de quadros
+        # ----------------------------------------------------
+        # 2. Limite de quadros
+        # ----------------------------------------------------
+
         if MODO_DIAGNOSTICO:
             limite = LIMITE_QUADROS
 
@@ -69,19 +112,59 @@ def main():
                     "P4_FRAME_LIMIT deve ser maior que zero."
                 )
 
-        # Inicializa a fonte de vídeo
-        camera = V4L2Source(
-            device=config["device"],
-            width=config["width"],
-            height=config["height"],
-            pixel_format=config["pixel_format"],
-            sensor_mode=config.get("sensor_mode")
-        )
+        # ----------------------------------------------------
+        # 3. Inicialização da fonte de vídeo
+        # ----------------------------------------------------
 
-        # Inicializa o conversor TSC quando solicitado
+        if TIPO_FONTE == "camera":
+
+            fonte = V4L2Source(
+                device=config["device"],
+                width=config["width"],
+                height=config["height"],
+                pixel_format=config["pixel_format"],
+                sensor_mode=config.get("sensor_mode")
+            )
+
+        else:
+            # Vídeo MP4 simulando uma câmera
+            caminho = Path(CAMINHO_VIDEO).expanduser()
+
+            if not caminho.is_file():
+                raise FileNotFoundError(
+                    f"Vídeo não encontrado: {caminho}"
+                )
+
+            fonte = VideoFileSource(str(caminho))
+
+            config = {
+                "source_id": f"file_{caminho.stem}",
+                "width": fonte.width,
+                "height": fonte.height,
+                "fps": fonte.fps,
+                "pixel_format": "BGR8",
+                "raw": False,
+                "socket_path": "/tmp/p4_file_shm"
+            }
+
+            print(
+                f"Arquivo de vídeo: {caminho}"
+            )
+
+            print(
+                f"Vídeo: {fonte.width}x{fonte.height} | "
+                f"FPS: {fonte.fps} | "
+                f"Formato: BGR8"
+            )
+
+        # ----------------------------------------------------
+        # 4. Conversor TSC (somente câmeras CSI)
+        # ----------------------------------------------------
+
         tsc_converter = None
 
-        if NORMALIZAR_TSC:
+        if NORMALIZAR_TSC and TIPO_FONTE == "camera":
+
             if CAMERA_SELECIONADA not in ("imx477", "imx519"):
                 raise ValueError(
                     "Conversão TSC habilitada para uma fonte "
@@ -104,26 +187,44 @@ def main():
                 f"{tsc_converter.offset_ns / 1_000_000:.3f} ms"
             )
 
-        # Inicializa o P4
+        elif NORMALIZAR_TSC and TIPO_FONTE == "file":
+            print(
+                "Conversão TSC ignorada para arquivo de vídeo."
+            )
+
+        # ----------------------------------------------------
+        # 5. Inicialização do P4
+        # ----------------------------------------------------
+
         p4 = P4(
-            source=camera,
+            source=fonte,
             source_id=config["source_id"],
             fps=config["fps"],
             raw=config["raw"],
             tsc_converter=tsc_converter
         )
 
-        # Inicializa os serviços apenas no modo completo
+        # ----------------------------------------------------
+        # 6. Serviços do modo completo
+        # ----------------------------------------------------
+
         if not MODO_DIAGNOSTICO:
+
             from .shm_publisher import SHMPublisher
 
             publisher = SHMPublisher(
                 socket_path=config["socket_path"],
                 width=config["width"],
-                height=config["height"]
+                height=config["height"],
+                pixel_format=config["pixel_format"]
+            )
+
+            print(
+                f"SHM configurado: {config['socket_path']}"
             )
 
             if ATIVAR_KAFKA:
+
                 from .kafka_publisher import KafkaPublisher
 
                 if not KAFKA_SERVIDOR:
@@ -135,15 +236,22 @@ def main():
                     bootstrap_servers=KAFKA_SERVIDOR
                 )
 
-        # Conversor UTC existente
+        # ----------------------------------------------------
+        # 7. Conversor UTC existente
+        # ----------------------------------------------------
+
         clock = (
             ClockConverter()
             if CONVERTER_TIMESTAMP_UTC
             else None
         )
 
-        # Monta e publica o evento de início de sessão
+        # ----------------------------------------------------
+        # 8. Evento de início de sessão
+        # ----------------------------------------------------
+
         def informar_inicio_sessao(evento: dict):
+
             evento_formatado = montar_evento_inicio_sessao(
                 evento
             )
@@ -155,14 +263,17 @@ def main():
                     evento_formatado
                 )
 
-        # Processa cada frame recebido
+        # ----------------------------------------------------
+        # 9. Processamento de cada frame
+        # ----------------------------------------------------
+
         def receber_frame(frame, metadata):
 
             # MODO DIAGNÓSTICO
             if MODO_DIAGNOSTICO:
 
-                # Exibe informações a cada 10 frames
                 if frame.frame_index % 10 == 0:
+
                     print(
                         f"Frame {frame.frame_index} | "
                         f"{frame.width}x{frame.height} | "
@@ -173,7 +284,6 @@ def main():
                         f"FPS: {metadata.fps}"
                     )
 
-                    # Timestamps normalizados para MONOTONIC_RAW
                     captura_raw = (
                         metadata.captured_at_monotonic_raw_ns
                     )
@@ -182,11 +292,13 @@ def main():
                         metadata.received_at_monotonic_raw_ns
                     )
 
-                    # Compara apenas timestamps na mesma base
+                    # Compara somente quando existe um instante
+                    # de captura física na mesma base temporal.
                     if (
                         captura_raw is not None
                         and recebimento_raw is not None
                     ):
+
                         diferenca_ms = (
                             recebimento_raw - captura_raw
                         ) / 1_000_000
@@ -200,20 +312,22 @@ def main():
 
             # MODO COMPLETO
 
-            # Transmite o pacote P4R1 pelo SHM
+            # Publica o pacote P4R1 no SHM
             publisher.publish(frame, metadata)
 
-            # Monta o evento do frame no formato B2
+            # Monta o evento no formato B2
             evento = montar_evento_frame(metadata)
 
-            # Conversão UTC existente, se habilitada
+            # Conversão UTC, se habilitada
             if clock is not None:
+
                 if metadata.captured_at_ns is not None:
+
                     evento["captured_at_utc"] = clock.to_utc(
                         metadata.captured_at_ns
                     )
 
-            # Publica no Kafka, se estiver ativo
+            # Envia para o Kafka, se estiver ativo
             if kafka is not None:
                 kafka.publicar_frame(evento)
 
@@ -221,7 +335,10 @@ def main():
             if frame.frame_index % 30 == 0:
                 print(json.dumps(evento))
 
-        # Identifica o modo de execução
+        # ----------------------------------------------------
+        # 10. Identificação da execução
+        # ----------------------------------------------------
+
         modo = (
             "DIAGNÓSTICO"
             if MODO_DIAGNOSTICO
@@ -230,19 +347,35 @@ def main():
 
         print(
             f"P4 iniciado | "
-            f"Câmera: {CAMERA_SELECIONADA} | "
+            f"Fonte: {TIPO_FONTE} | "
+            f"Identificação: {config['source_id']} | "
             f"Modo: {modo}"
         )
 
-        # Inicia a captura
-        p4.run(
-            consumer=receber_frame,
-            frame_limit=limite,
-            on_session_started=informar_inicio_sessao
-        )
+        # ----------------------------------------------------
+        # 11. Execução
+        # ----------------------------------------------------
+
+        try:
+            p4.run(
+                consumer=receber_frame,
+                frame_limit=limite,
+                on_session_started=informar_inicio_sessao
+            )
+
+        except StopIteration:
+            if TIPO_FONTE == "file":
+                print(
+                    "Fim do arquivo de vídeo. "
+                    "Reprodução encerrada normalmente."
+                )
+            else:
+                raise
 
         if MODO_DIAGNOSTICO:
-            print("Diagnóstico finalizado com sucesso!")
+            print(
+                "Diagnóstico finalizado com sucesso!"
+            )
 
     except KeyboardInterrupt:
         print("\nCaptura interrompida.")
@@ -251,16 +384,19 @@ def main():
         print(f"Erro no P4: {erro}")
 
     finally:
-        # Métricas de captura
+        # ----------------------------------------------------
+        # 12. Métricas e liberação dos recursos
+        # ----------------------------------------------------
+
         if p4 is not None:
             print(
                 "Métricas de captura:",
                 json.dumps(p4.metrics.resumo())
             )
 
-        # Libera SHM e câmera antes do Kafka
         try:
             if publisher is not None:
+
                 print(
                     "Métricas de transmissão:",
                     json.dumps(publisher.resumo())
@@ -270,14 +406,16 @@ def main():
 
         finally:
             try:
-                if camera is not None:
-                    camera.release()
+                if fonte is not None:
+                    fonte.release()
 
             finally:
                 if kafka is not None:
                     kafka.release()
 
-                print("Recursos de captura liberados.")
+                print(
+                    "Recursos de captura liberados."
+                )
 
 
 if __name__ == "__main__":

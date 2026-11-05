@@ -17,10 +17,23 @@ class SHMPublisher:
         self,
         socket_path="/tmp/p4_video_shm",
         width=640,
-        height=480
+        height=480,
+        pixel_format="RG10"
     ):
         self.width = width
         self.height = height
+        self.pixel_format = pixel_format
+
+        formatos_suportados = {
+            "RG10": 16,
+            "BGR8": 24
+        }
+
+        if pixel_format not in formatos_suportados:
+            raise ValueError(
+                f"Formato de pixel não suportado: {pixel_format}. "
+            )
+        storage_bits = formatos_suportados[pixel_format]
 
         self.frames_aceitos_appsrc = 0
         self.bytes_aceitos_appsrc = 0
@@ -38,7 +51,7 @@ class SHMPublisher:
             "format=time do-timestamp=true block=true "
             "caps=application/x-ods-frame,version=1,"
             f"width={width},height={height},"
-            "storage-bits=16,framerate=0/1 "
+            f"storage-bits={storage_bits},framerate=0/1 "
             f"! shmsink socket-path={socket_path} "
             "shm-size=33554432 "
             "wait-for-connection=false sync=false"
@@ -59,9 +72,9 @@ class SHMPublisher:
                 "O índice do frame não corresponde aos metadados."
             )
 
-        if frame.pixel_format != "RG10":
+        if frame.pixel_format != self.pixel_format:
             raise ValueError(
-                "O publicador espera quadros RG10 (10-bit raw)."
+                f"O publicador espera quadros {self.pixel_format} e recebeu {frame.pixel_format}."
             )
 
         if (frame.width, frame.height) != (self.width, self.height):

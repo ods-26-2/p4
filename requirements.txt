@@ -1,5 +1,4 @@
-
 linuxpy==0.25.0
 confluent-kafka==2.16.1
-numpy
-opencv-python
+numpy==2.2.6
+opencv-python-headless==5.0.0.93

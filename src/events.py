@@ -1,4 +1,3 @@
-
 import uuid
 from datetime import datetime, timezone
 
@@ -29,6 +28,21 @@ def montar_evento_frame(metadata: FrameMetadata) -> dict:
             "CLOCK_MONOTONIC_RAW"
         )
 
+    # Instante em que o frame foi recebido pelo P4.
+    # Para arquivos MP4, representa a reprodução simulada,
+    # não o instante da gravação original.
+    recebimento_raw = getattr(
+        metadata,
+        "received_at_monotonic_raw_ns",
+        None
+    )
+
+    if recebimento_raw is not None:
+        payload["received_at_monotonic_raw_ns"] = recebimento_raw
+        payload["received_at_monotonic_raw_clock"] = (
+            "CLOCK_MONOTONIC_RAW"
+        )
+
     return {
         "message_id": str(uuid.uuid4()),
         "message_type": "event",
@@ -51,7 +65,9 @@ def montar_evento_inicio_sessao(evento: dict) -> dict:
         "schema": "ods.session.started",
         "schema_version": "1.0",
         "producer": "P4",
-        "occurred_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "occurred_at": datetime.now(
+            timezone.utc
+        ).isoformat().replace("+00:00", "Z"),
         "source_id": evento["source_id"],
         "session_id": evento["session_id"],
         "payload": {

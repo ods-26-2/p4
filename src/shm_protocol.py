@@ -32,6 +32,18 @@ def criar_cabecalho(metadata: FrameMetadata, tamanho_dados: int) -> bytes:
             "CLOCK_MONOTONIC_RAW"
         )
 
+    # Instante de recebimento/reprodução na base MONOTONIC_RAW
+    recebimento_raw = getattr(
+        metadata,
+        "received_at_monotonic_raw_ns",
+        None
+    )
+
+    if recebimento_raw is not None:
+        campos["received_at_monotonic_raw_ns"] = recebimento_raw
+        campos["received_at_monotonic_raw_clock"] = (
+            "CLOCK_MONOTONIC_RAW"
+        )
 
     conteudo = json.dumps(campos).encode("utf-8")
 
