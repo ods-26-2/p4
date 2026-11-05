@@ -1,505 +1,494 @@
 # SIS-2 — P4: Fonte de Vídeo
 
-Componente **P4 — Fonte de Vídeo**, integrante do SIS-2 (Sinal e Dispositivo) do projeto ODS.
+**Projeto ODS 2026/2 · Componente P4 · Squad SIS-2 (Sinal e Dispositivo)**  
+**Estado documentado:** 05/11/2026 · **Plataforma de validação atual:** NVIDIA Jetson Orin, Ubuntu 22.04 / JetPack R36.4.7
 
-O P4 captura quadros de uma câmera, preserva as informações temporais e de sequência disponibilizadas pelo driver e entrega **vídeo** e **metadados** por canais distintos:
+O **P4** captura quadros de câmeras CSI por V4L2, preserva o conteúdo bruto da imagem e disponibiliza **vídeo** e **eventos de metadados** por canais distintos:
 
-- **GStreamer + memória compartilhada (SHM):** transmissão local de imagens para o consumidor de vídeo, como o I1.
-- **Apache Kafka:** publicação de eventos de início de sessão e de metadados dos quadros.
+- **GStreamer + memória compartilhada (SHM):** transporta os bytes RAW10 de cada quadro, acompanhados de um cabeçalho de identificação `P4R1`.
+- **Apache Kafka:** publica eventos leves de início de sessão e metadados por quadro, **sem transportar os pixels**.
 
-O projeto também possui um **modo diagnóstico**, usado para verificar a captura sem depender de GStreamer/SHM ou Kafka. Esse é o modo previsto para o primeiro teste com a IMX519 na Jetson.
+O componente oferece um **modo diagnóstico**, para testar somente a captura, e um **modo completo**, para publicar os quadros via SHM e, opcionalmente, os eventos via Kafka.
 
-> **Estado em 04/11/2026:** o fluxo principal foi validado com a webcam **EMEET SmartCam C60E 4K no WSL2**: captura V4L2, timestamps do driver, métricas, transmissão GStreamer/SHM e eventos Kafka. Há **5 testes automatizados aprovados**. A Jetson já executa o código e reconhece um dispositivo V4L2, mas **ainda não entregou quadros das câmeras CSI**; foram identificadas inconsistências no driver/overlay. A associação exata dos quadros SHM aos eventos Kafka e os testes de simultaneidade de duas câmeras continuam pendentes.
+> **Estado real em 05/11/2026:** as câmeras **IMX519** e **IMX477** já foram validadas **individualmente** na Jetson, com captura `1920 × 1080`, formato `RG10` (Bayer RAW10) e transmissão pelo SHM. O leitor de teste conseguiu receber pacotes P4R1, verificar os metadados e comparar a integridade dos bytes RAW com SHA-256 em testes anteriores. **Ainda não concluímos** a integração com um consumidor real do ODS, a validação simultânea das câmeras, a confirmação de publicação Kafka na Jetson nem os testes prolongados de estabilidade.
 
-## 1. Responsabilidades e arquitetura
-
-O componente é responsável por:
-
-1. Inicializar uma fonte de vídeo e capturar seus buffers.
-2. Representar cada quadro por meio de `Frame` e gerar seus metadados em `FrameMetadata`.
-3. Preservar, quando disponíveis, número de sequência e timestamp fornecidos pelo driver V4L2.
-4. Disponibilizar os quadros ao consumidor por GStreamer/SHM.
-5. Publicar eventos leves no Kafka sem enviar os pixels pelo broker.
-6. Oferecer diagnóstico de captura, permitindo investigar sensores e drivers isoladamente.
-
-Fluxo implementado para a webcam EMEET:
+## 1. Arquitetura
 
 ```text
-EMEET (USB) ── V4L2 / linuxpy ── Frame ── P4
-                                        │
-                  ┌─────────────────────┴──────────────────────┐
-                  │                                            │
-           SHMPublisher                                 KafkaPublisher
-        MJPEG → JPEG decoder → BGR                  Eventos JSON por quadro
-                  │                                            │
-       GStreamer shmsink                            ods.session.started
-                  │                                 ods.p4.frame
-        /tmp/p4_video_shm                                     │
-                  │                                   Consumidores Kafka
-       shmsrc → I1 (simulado)
+IMX519 / IMX477 (CSI)
+       │
+       ▼
+Driver CSI + V4L2 / linuxpy
+       │  RG10 / RAW10; sequência e timestamp do driver
+       ▼
+P4 (Frame, FrameMetadata, sessão e métricas)
+       │
+       ├─────────────────────────────────────┐
+       │                                     │
+       ▼                                     ▼
+SHMPublisher                           KafkaPublisher
+GStreamer: appsrc → shmsink            Eventos JSON (formato B2)
+P4R1 + bytes RAW10                     ods.session.started
+       │                                ods.p4.frame
+       ▼                                     │
+Socket SHM local                             ▼
+       │                              Broker / consumidores
+       ▼
+Leitor SHM (tests/shm_reader.py)
+       │
+       ▼
+Cabeçalho + bytes RAW10
+(visualização Bayer/RGB requer etapa adicional)
 ```
 
-**Importante:** a câmera EMEET entrega **MJPEG** ao `V4L2Source`, mas a pipeline SHM transmite **BGR** após decodificação. O campo `format` dos metadados atualmente descreve o formato **capturado**, não o formato de saída SHM.
-
-A implementação atual da `SHMPublisher` aceita **MJPEG** e usa `jpegdec`; portanto, o **modo completo não está pronto para transmitir diretamente o Bayer RAW10 da IMX519**. Primeiro será validada a captura no modo diagnóstico; a adaptação da transmissão virá depois.
-
-A correção da distorção da lente **não integra as responsabilidades atuais do P4**. Quando necessária, deverá ser executada por componentes posteriores a partir dos parâmetros de calibração apropriados.
+**Atenção:** o SHM é um transporte **local à mesma máquina**. Um processo em outro computador não acessa diretamente o socket `/tmp/...` da Jetson. O P4 **não** converte a imagem para RGB nem aplica correção de distorção; conforme a arquitetura ODS 6c, entrega o quadro bruto. Correção/calibração é responsabilidade de etapas posteriores.
 
 ## 2. Estado de implementação
 
-| Recurso | Estado / evidência |
-|---|---|
-| Captura EMEET por V4L2 e `linuxpy` | Validada no WSL2 (640 × 480, MJPEG) |
-| Origem e numeração dos timestamps | Observada na EMEET (`driver_soe`); não validada nas IMX |
-| Modo diagnóstico | Validado: 30 quadros sem SHM nem Kafka |
-| Métricas de captura | Contagem de quadros, saltos de sequência e FPS médio; validadas com EMEET e simulações |
-| Saída GStreamer/SHM | 69 quadros aceitos pelo `appsrc` no último ensaio de encerramento; leitor I1 simulado recebeu 30 quadros em ensaio separado |
-| Kafka | 70/70 eventos confirmados no último ensaio de encerramento (69 frames + 1 sessão) |
-| Contagem de falhas de Kafka | Implementada; queda do broker durante captura observada, mas o novo encerramento sob falha ainda não foi revalidado |
-| Encerramento do SHM | Validado: `release()` fecha a pipeline e o GStreamer remove o socket na execução normal |
-| Evento de início após o primeiro quadro | Validado com EMEET e com fonte simulada que falha antes de capturar |
-| Seleção de câmera e modo por variáveis de ambiente | Validada com `P4_CAMERA=emeet` e ambos os modos |
-| Isolamento lógico de duas fontes | Validado sequencialmente em testes unitários; execução simultânea não validada |
-| Testes automatizados | **5 testes `unittest` aprovados** |
-| Associação exata imagem SHM ↔ evento Kafka | Pendente; exige contrato com o I1 |
-| Captura IMX519 / IMX477 na Jetson | Pendente: nenhum quadro real recebido |
-| Pipeline SHM para Bayer RG10 / RAW10 | Pendente: publicador atual aceita MJPEG |
-| Testes prolongados de estabilidade, uso de memória e falhas | Pendentes |
+| Item | Situação e evidência |
+| --- | --- |
+| Drivers/overlays CSI IMX519 e IMX477 | **Validado na Jetson**: dispositivos acessíveis e quadros reais capturados. |
+| Captura por V4L2/LinuxPy | **Validada** nas duas câmeras, individualmente, a `1920 × 1080` e `RG10`. |
+| Modo diagnóstico | **Validado**; captura 30 quadros por padrão, sem inicializar SHM ou Kafka. |
+| Frame, metadados e sessões | **Implementados** em `Frame`, `FrameMetadata` e `P4`. |
+| Transporte RAW10 via GStreamer/SHM | **Validado** em execuções limitadas, nas duas câmeras separadamente. |
+| Protocolo P4R1 | **Implementado e testado**; inclui IDs, timestamp, formato, dimensões e tamanho RAW. |
+| Recepção e integridade no leitor de teste | **Validada em testes separados**, inclusive por SHA-256; não equivale à homologação do I1 real. |
+| Eventos `ods.session.started` e `ods.p4.frame` | **Implementados**; gerados em JSON. |
+| Kafka no código | **Implementado**, com callbacks de confirmação, tratamento de falhas e testes simulados. |
+| Kafka compartilhado na Jetson | **Pendente de teste de publicação/consumo confirmado**. Contratos e tópicos devem ser alinhados com TRA-1/Rafael. |
+| Timestamps do driver | **Parcial**: origem `driver_eof` observada; ainda há uma discrepância temporal e um intervalo inicial a investigar. |
+| Execução simultânea de IMX519 e IMX477 | **Não validada**. |
+| Integração com consumidor real (I1/P6/outros) | **Pendente**. |
+| Estabilidade prolongada, perdas, memória e recuperação | **Pendente**. |
+| Testes automatizados | **14 testes aprovados** na última execução registrada durante o desenvolvimento. |
 
-**Limite das evidências:** `push-buffer = OK` comprova aceitação pelo `appsrc`, não recebimento pelo I1. Uma confirmação Kafka comprova entrega de mensagem ao broker, não correlação com a imagem. Os ensaios com a EMEET não homologam o desempenho na Jetson.
+### 2.1. Resultados obtidos na Jetson
 
-## 3. Estrutura do projeto
+Em testes do **modo completo com Kafka desativado**, usando **120 quadros por execução**:
 
-Arquivos principais da implementação atual:
+| Câmera | Frames capturados | Buffers aceitos pelo `appsrc` | Perdas estimadas | FPS médio informado |
+| --- | ---: | ---: | ---: | ---: |
+| IMX519 | 120 | 120 | 0 | 58,07 |
+| IMX477 | 120 | 120 | 0 | 58,05 |
 
-```text
-P4/
-├── src/
-│   ├── __init__.py
-│   ├── main.py             # Seleção de câmera, modo e execução
-│   ├── config.py           # Configurações EMEET, IMX519 e IMX477
-│   ├── source.py           # Interface VideoSource
-│   ├── v4l2_source.py      # Captura V4L2 via linuxpy
-│   ├── webcam_source.py    # Alternativa de captura via OpenCV
-│   ├── frame.py            # Estrutura Frame
-│   ├── metadata.py         # Estrutura FrameMetadata
-│   ├── p4.py               # Sessão, leitura e processamento dos quadros
-│   ├── capture_metrics.py  # Quadros, saltos estimados e FPS médio
-│   ├── clock.py            # Conversão aproximada monotônico → UTC
-│   ├── events.py           # Montagem dos eventos de metadados
-│   ├── shm_publisher.py    # Publicação de vídeo via GStreamer/SHM
-│   └── kafka_publisher.py  # Produtor de eventos Kafka
-├── tests/
-│   ├── shm_reader.py       # Leitor SHM que simula o consumidor I1
-│   ├── test_p4.py          # Testes de sessão, FPS e isolamento das fontes
-│   └── test_capture_metrics.py # Teste de saltos na numeração
-├── .gitignore
-├── requirements.txt
-└── README.md
+Cada execução reportou aproximadamente **497,69 MB** aceitos pelo `appsrc`, incluindo os cabeçalhos P4R1. Em testes **isolados de captura** e de **captura + SHM instrumentada**, a IMX477 apresentou aproximadamente **60 FPS**.
+
+O valor de 58 FPS foi influenciado por um intervalo de **83,331 ms entre os frames 1 e 2**, seguido de intervalos próximos de 16,667 ms. A causa ainda está sob investigação. Os testes não justificam afirmar uma perda contínua de 2 FPS.
+
+> `frames_aceitos_appsrc` significa que o GStreamer aceitou o buffer de entrada. **Não comprova que outro processo recebeu aquele quadro.** Essa recepção foi testada separadamente. Analogamente, `frames_perdidos_estimados = 0` não garante ausência absoluta de descartes no driver.
+
+## 3. Câmeras e configuração atual
+
+As definições estão em [`src/config.py`](src/config.py):
+
+| Parâmetro | IMX519 | IMX477 |
+| --- | --- | --- |
+| Nome em `P4_CAMERA` | `imx519` | `imx477` |
+| Dispositivo no ambiente testado | `/dev/video1` | `/dev/video0` |
+| `sensor_mode` | `2` | `1` |
+| Resolução | `1920 × 1080` | `1920 × 1080` |
+| Formato V4L2 | `RG10` | `RG10` |
+| `raw` | `true` | `true` |
+| Socket SHM | `/tmp/p4_imx519_shm` | `/tmp/p4_imx477_shm` |
+
+Ambas estão habilitadas. **Os caminhos `/dev/videoX` dependem da configuração da Jetson e podem mudar** após alterações de driver, overlay, conexão física ou reinicialização. Confirme os dispositivos antes de executar o programa:
+
+```bash
+v4l2-ctl --list-devices
+v4l2-ctl -d /dev/video0 --list-formats-ext
+v4l2-ctl -d /dev/video1 --list-formats-ext
 ```
 
-Outros testes ou diretórios antigos podem estar presentes localmente. A pasta `src_old/` é um backup da implementação anterior e **não faz parte da aplicação atual**.
+Os sensores exigem drivers e overlays CSI compatíveis com cada câmera. A instalação desses drivers/overlays é específica do hardware e **não é automatizada por este repositório**; não troque overlays da Jetson compartilhada sem alinhar com a equipe.
 
-## 4. Configurações
+### 3.1. Representação dos bytes RAW10
 
-### 4.1. Câmeras — `src/config.py`
+`RG10` representa dados brutos de um sensor com **mosaico Bayer**, não uma imagem RGB pronta. Nas capturas atuais, cada quadro `1920 × 1080` possui **4.147.200 bytes** (2 bytes por pixel, usados como contêiner para amostras de 10 bits). O consumidor precisa interpretar corretamente a disposição das amostras e a matriz Bayer para obter uma imagem visualizável.
 
-As configurações ficam em `CAMERAS`, com uma entrada para cada fonte:
+**Não** trate esses bytes como JPEG, PNG ou `RGB888`, nem tente exibi-los diretamente como `video/x-raw` convencional. O protocolo de SHM usa caps personalizados: `application/x-ods-frame`.
 
-| Câmera | Finalidade atual | Situação |
-|---|---|---|
-| `emeet` | Desenvolvimento e integração no WSL2 | Habilitada e validada |
-| `imx519` | Primeira câmera CSI para testes na Jetson | Configuração preliminar; captura pendente |
-| `imx477` | Segunda câmera CSI planejada para a Jetson | Configuração incompleta; desabilitada |
+## 4. Dependências e preparação
 
-Cada entrada contém `source_id`, `device`, `width`, `height`, `fps`, `pixel_format`, `raw`, `socket_path` e `enabled`.
+Requisitos do ambiente validado:
 
-Na EMEET, os valores testados foram `/dev/video0`, **640 × 480**, `MJPG` e `raw=False`.
+- Jetson Orin com acesso às câmeras CSI pelo V4L2.
+- Python 3.10 ou outra versão compatível com as bibliotecas instaladas no dispositivo.
+- Pacotes Python do [`requirements.txt`](requirements.txt): `linuxpy==0.25.0`, `confluent-kafka==2.16.1`, `numpy` e `opencv-python`.
+- GStreamer com `appsrc`, `shmsink`, `shmsrc`, `appsink` e bindings Python `gi` / PyGObject.
 
-Para a IMX519, a configuração inicial de diagnóstico utiliza **1920 × 1080** e **`RG10`** (Bayer RAW10), com dispositivo inicialmente indicado como `/dev/video0`. Esses parâmetros foram anunciados anteriormente pelo driver, **mas a entrega real dos buffers ainda precisa ser confirmada**. Os caminhos `/dev/videoX` podem mudar; sempre verificar na Jetson.
+Na **Jetson já configurada do projeto**, entre na pasta do repositório e ative o ambiente virtual existente:
 
-Os sockets SHM são configuráveis por fonte. O `main.py` seleciona **uma fonte por processo**. Duas instâncias do P4 já foram testadas em sequência, com IDs e métricas independentes; **a execução simultânea de dois processos com câmeras CSI ainda não foi validada**.
-
-### 4.2. Execução — `src/main.py`
-
-A câmera e o modo agora podem ser escolhidos pelo **terminal**, sem editar o Python:
-
-```python
-CAMERA_SELECIONADA = os.getenv("P4_CAMERA", "emeet")
-MODO_DIAGNOSTICO = (
-    os.getenv("P4_MODO_DIAGNOSTICO", "true").lower() == "true"
-)
-LIMITE_QUADROS = 30
-CONVERTER_TIMESTAMP_UTC = False
-ATIVAR_KAFKA = True
+```bash
+cd ~/SIS-2/p4
+source venv/bin/activate
 ```
 
-- **Diagnóstico:** captura um número limitado de quadros, exibe formato, timestamp e FPS, sem inicializar SHM/Kafka. O evento de sessão é apenas exibido localmente.
-- **Completo:** captura continuamente, envia vídeo pelo SHM e, se ativado, publica metadados no Kafka. A entrada atual da pipeline exige MJPEG.
-- **UTC:** acrescenta um timestamp UTC aproximado aos eventos, sem alterar o valor original monotônico.
-
-O broker é definido com `P4_KAFKA_BOOTSTRAP_SERVERS`, obrigatório no modo completo quando Kafka está ativado. **Uma sessão só é anunciada depois de receber o primeiro quadro**; isso não equivale à confirmação da entrega pelo Kafka.
-
-## 5. Dependências
-
-### 5.1. Python
-
-O `requirements.txt` da implementação atual deve incluir:
-
-```text
-linuxpy==0.25.0
-confluent-kafka==2.16.1
-numpy
-opencv-python
-```
-
-As versões fixadas de `linuxpy` e `confluent-kafka` correspondem ao ambiente WSL testado. **Não foi comprovada ainda a compatibilidade dessas versões com o Python e o sistema ARM64 da Jetson.** Para o primeiro diagnóstico CSI, a dependência principal é `linuxpy`.
-
-### 5.2. Ubuntu / GStreamer
-
-Para captura e teste SHM no Ubuntu/WSL2:
+Se for preparar **outro ambiente Ubuntu autorizado**, instale as dependências de sistema necessárias (pode ser necessário adaptar à imagem do sistema):
 
 ```bash
 sudo apt update
 sudo apt install -y \
-  python3 python3-venv python3-pip \
-  python3-gi gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 \
+  python3-venv python3-pip python3-gi \
+  gir1.2-gstreamer-1.0 \
   gstreamer1.0-tools gstreamer1.0-plugins-base \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-  v4l-utils usbutils
+  v4l-utils
 ```
 
-O pacote `gstreamer1.0-plugins-bad` disponibilizou os elementos `shmsink` e `shmsrc` no ambiente testado. As bibliotecas `gi`/GStreamer são providas pelo sistema e não apenas pelo `pip`.
-
-Criar um ambiente virtual na raiz do projeto:
+Para clonar e instalar as dependências Python:
 
 ```bash
-python3 -m venv --system-site-packages .venv
-source .venv/bin/activate
+git clone https://github.com/ods-26-2/p4.git
+cd p4
+python3 -m venv --system-site-packages venv
+source venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
-`--system-site-packages` permite que o ambiente virtual encontre o `gi` instalado pelo Ubuntu. Na Jetson, o procedimento de instalação deve ser ajustado conforme a versão do Python e as bibliotecas disponíveis no JetPack.
-
-Verificações úteis:
+Na Jetson usada nos testes, o binding `gi` instalado pelo sistema ficou acessível ao Python do ambiente virtual com:
 
 ```bash
-python -c "import linuxpy; print('linuxpy OK')"
-python -c "import gi; gi.require_version('Gst', '1.0'); from gi.repository import Gst; Gst.init(None); print(Gst.version_string())"
+PYTHONPATH=/usr/lib/python3/dist-packages python -c \
+  "import gi; gi.require_version('Gst', '1.0'); from gi.repository import Gst; Gst.init(None); print(Gst.version_string())"
+```
+
+Confirme também a instalação dos elementos GStreamer:
+
+```bash
 gst-inspect-1.0 shmsink
 gst-inspect-1.0 shmsrc
 ```
 
-## 6. Conectar a EMEET ao WSL2
+> O `PYTHONPATH` acima reflete o **ambiente da Jetson testada**. Em outros sistemas, o caminho dos pacotes de sistema pode ser diferente. Não é necessário instalar ou iniciar um broker Kafka para testar **somente o SHM**.
 
-O Windows precisa compartilhar a câmera USB com o Linux do WSL2 por meio do **usbipd**. O procedimento pode precisar ser repetido após reiniciar o computador ou desconectar o dispositivo.
+## 5. Executando o P4
 
-**No PowerShell do Windows:**
+Execute os comandos **na raiz do repositório**, com o ambiente virtual ativo.
 
-```powershell
-usbipd list
-```
+### 5.1. Variáveis de ambiente
 
-Encontre a câmera EMEET e seu `BUSID` atual. No ambiente de desenvolvimento, o dispositivo foi identificado como `328f:00f3`. **O BUSID não é fixo**: use o exibido no seu computador.
+| Variável | Valor padrão atual | Função |
+| --- | --- | --- |
+| `P4_CAMERA` | `imx519` | Câmera selecionada (`imx519` ou `imx477`). |
+| `P4_MODO_DIAGNOSTICO` | `true` | `true`: somente captura; `false`: modo completo. |
+| `P4_ATIVAR_KAFKA` | `true` | No modo completo, `false` desativa o envio ao Kafka. |
+| `P4_FRAME_LIMIT` | Não definido | Limita o total de quadros **no modo completo**; sem valor, o fluxo é contínuo. |
+| `P4_KAFKA_BOOTSTRAP_SERVERS` | Não definido | Endereço do broker, obrigatório quando Kafka está ativo no modo completo. |
 
-Se necessário, no PowerShell **como administrador**, compartilhe o dispositivo (substitua `BUSID`):
+**Nota de versão:** `P4_FRAME_LIMIT` e `P4_ATIVAR_KAFKA` foram adicionadas ao `src/main.py` **na cópia local da Jetson**. Elas precisam ser incluídas em um commit e enviadas ao GitHub para os comandos desta seção funcionarem em um clone novo. O modo diagnóstico permanece limitado a **30 quadros**, independentemente de `P4_FRAME_LIMIT`.
 
-```powershell
-usbipd bind --busid BUSID
-```
+### 5.2. Modo diagnóstico — somente captura
 
-Depois conecte ao WSL:
-
-```powershell
-usbipd attach --wsl --busid BUSID
-```
-
-**No Ubuntu/WSL2:**
+**IMX519:**
 
 ```bash
-lsusb
-ls /dev/video*
-v4l2-ctl --list-devices
-v4l2-ctl -d /dev/video0 --list-formats-ext
+P4_CAMERA=imx519 P4_MODO_DIAGNOSTICO=true python -m src.main
 ```
 
-Confirme qual `/dev/videoX` corresponde à captura da EMEET. No ambiente testado foi `/dev/video0`, mas a numeração pode mudar. Se necessário, atualize `device` em `src/config.py`.
-
-Se houver erro de permissão, verifique o grupo do dispositivo (`ls -l /dev/video0`). Em configurações usuais, o usuário precisa pertencer ao grupo `video`; uma mudança de grupo pode exigir novo login.
-
-## 7. Executar o P4
-
-Todos os comandos são executados na raiz do projeto com a `.venv` ativa. Em ambos os modos a EMEET deve estar acessível no WSL2.
-
-### 7.1. Modo diagnóstico — somente captura
+**IMX477:**
 
 ```bash
-P4_CAMERA=emeet P4_MODO_DIAGNOSTICO=true python -m src.main
+P4_CAMERA=imx477 P4_MODO_DIAGNOSTICO=true python -m src.main
 ```
 
-O padrão é 30 quadros. Uma saída real do desenvolvimento foi:
+Captura 30 quadros e imprime metadados periodicamente. Não inicializa os publicadores de SHM ou Kafka; o evento de início da sessão aparece **apenas no terminal**.
+
+### 5.3. Modo completo — SHM sem Kafka
+
+**IMX519 — teste limitado a 120 quadros:**
+
+```bash
+PYTHONPATH=/usr/lib/python3/dist-packages \
+P4_CAMERA=imx519 \
+P4_MODO_DIAGNOSTICO=false \
+P4_ATIVAR_KAFKA=false \
+P4_FRAME_LIMIT=120 \
+python -m src.main
+```
+
+**IMX477 — teste limitado a 120 quadros:**
+
+```bash
+PYTHONPATH=/usr/lib/python3/dist-packages \
+P4_CAMERA=imx477 \
+P4_MODO_DIAGNOSTICO=false \
+P4_ATIVAR_KAFKA=false \
+P4_FRAME_LIMIT=120 \
+python -m src.main
+```
+
+O programa abre a câmera selecionada, publica pacotes P4R1 no socket configurado, imprime eventos de exemplo e encerra automaticamente após o limite. **Não há envio ao Kafka** quando `P4_ATIVAR_KAFKA=false`.
+
+Se quiser conectar um leitor em outro terminal, **120 quadros duram aproximadamente 2 segundos**. Use um limite maior, por exemplo `P4_FRAME_LIMIT=600` (cerca de 10 segundos), ou omita o limite e finalize depois com `Ctrl+C`.
+
+### 5.4. Modo completo — SHM + Kafka
+
+**Somente após confirmar os tópicos e contratos com TRA-1/Rafael**, configure um broker autorizado:
+
+```bash
+export P4_KAFKA_BOOTSTRAP_SERVERS="HOST_DO_BROKER:PORTA"
+
+PYTHONPATH=/usr/lib/python3/dist-packages \
+P4_CAMERA=imx519 \
+P4_MODO_DIAGNOSTICO=false \
+P4_ATIVAR_KAFKA=true \
+P4_FRAME_LIMIT=30 \
+python -m src.main
+```
+
+Não use esse comando como primeiro teste de integração com um broker compartilhado sem validar o contrato e o tópico `ods.p4.frame`. `produce()` enfileira mensagens assincronamente; a confirmação real depende dos callbacks de entrega e dos contadores no encerramento.
+
+## 6. Como outra equipe pode receber os quadros pelo SHM
+
+### 6.1. Interface de transporte
+
+O publicador usa, entre outros parâmetros:
 
 ```text
-P4 iniciado | Câmera: emeet | Modo: DIAGNÓSTICO
-{"event": "ods.session.started", "source_id": "emeet", "session_id": "..."}
-Frame 0 | 640x480 | Formato: MJPG | ... | Origem: driver_soe | FPS: None
-Frame 10 | 640x480 | Formato: MJPG | ... | FPS: 15.66
-Frame 20 | 640x480 | Formato: MJPG | ... | FPS: 15.63
-Diagnóstico finalizado com sucesso!
-Métricas de captura: {"frames_recebidos": 30, "frames_perdidos_estimados": 0, "fps_medio": 15.11}
-Recursos de captura liberados.
+appsrc
+  caps=application/x-ods-frame,version=1,
+       width=1920,height=1080,storage-bits=16,framerate=0/1
+  ! shmsink socket-path=/tmp/p4_imx519_shm
 ```
 
-A taxa de quadros e os timestamps variam entre execuções. O diagnóstico é a primeira modalidade a validar com uma câmera CSI real, **depois** de corrigidos driver, overlay e captura V4L2 na Jetson.
+O socket varia conforme a câmera. Cada **buffer GStreamer** contém **um pacote P4R1 completo**: cabeçalho e bytes brutos do quadro. Os sockets só existem durante a execução do publicador (salvo resíduos de encerramento anormal).
 
-### 7.2. Modo completo — SHM + Kafka
+O consumidor deve utilizar `shmsrc` e `appsink` para acessar os bytes, depois validar e interpretar o pacote conforme a próxima seção.
 
-Com o broker local em funcionamento:
+### 6.2. Testar a recepção com `tests/shm_reader.py`
+
+O arquivo [`tests/shm_reader.py`](tests/shm_reader.py) é um **leitor de validação**, não um decodificador de imagem. Ele recebe **um pacote**, interpreta o cabeçalho e imprime `source_id`, `session_id`, `frame_id`, formato, quantidade de bytes RAW e hash SHA-256.
+
+**Importante:** a versão atual do script aponta para **`/tmp/p4_raw_teste_shm`**, utilizado nos testes isolados. Para ler uma câmera real, é necessário mudar o caminho do socket. Um modo de testar **sem editar arquivos versionados** é criar uma cópia temporária:
+
+**Terminal A — iniciar a IMX519 na Jetson:**
 
 ```bash
-export P4_KAFKA_BOOTSTRAP_SERVERS="localhost:9092"
-P4_CAMERA=emeet P4_MODO_DIAGNOSTICO=false python -m src.main
+cd ~/SIS-2/p4
+source venv/bin/activate
+
+PYTHONPATH=/usr/lib/python3/dist-packages \
+P4_CAMERA=imx519 \
+P4_MODO_DIAGNOSTICO=false \
+P4_ATIVAR_KAFKA=false \
+P4_FRAME_LIMIT=600 \
+python -m src.main
 ```
 
-No segundo terminal, enquanto o P4 está rodando:
+**Terminal B — enquanto o P4 está em execução, ler um pacote:**
 
 ```bash
-python tests/shm_reader.py
+cd ~/SIS-2/p4
+source venv/bin/activate
+
+sed 's@/tmp/p4_raw_teste_shm@/tmp/p4_imx519_shm@' \
+  tests/shm_reader.py > /tmp/p4_imx519_reader.py
+
+PYTHONPATH="$PWD:/usr/lib/python3/dist-packages" \
+  python /tmp/p4_imx519_reader.py
 ```
 
-O leitor simula o I1, recebe 30 quadros via `shmsrc`, informa a resolução e salva `i1_frame.jpg`. O seu contador `i` **não é** o `frame_id` original do P4. Encerre o publicador com `Ctrl+C` **uma vez**; o `publisher.release()` encerra a pipeline e o `shmsink` remove o socket normalmente.
+Para a **IMX477**, troque `P4_CAMERA=imx519` por `P4_CAMERA=imx477` no terminal A e substitua o caminho no comando `sed` por `/tmp/p4_imx477_shm` no terminal B.
 
-Exemplo real do relatório de encerramento no modo completo:
+Exemplo de saída esperada do leitor (identificadores variam):
 
 ```text
-Métricas de captura: {"frames_recebidos": 69, "frames_perdidos_estimados": 0, "fps_medio": 14.97}
-Métricas de transmissão: {"frames_aceitos_appsrc": 69, "bytes_aceitos_appsrc": 1774572}
-Kafka | Enfileiradas: 70 | Confirmadas: 70 | Falhas de entrega: 0 | Falhas de envio: 0 | Pendentes: 0
-Recursos de captura liberados.
+Câmera: imx519
+Sessão: <uuid-da-execucao>
+Frame ID: <numero-do-quadro>
+Formato: RG10
+Bytes RAW recebidos: 4147200
+SHA-256 RAW: <hash-hexadecimal>
 ```
 
-- `frames_recebidos`: quantidade de buffers recebidos da câmera.
-- `frames_perdidos_estimados`: lacunas na numeração do driver; não mede todas as perdas possíveis.
-- `fps_medio`: taxa média entre o primeiro e o último timestamp monotônico válido.
-- `frames_aceitos_appsrc`: buffers aceitos pela **entrada** do GStreamer; não prova entrega ao I1.
-- `bytes_aceitos_appsrc`: soma dos bytes MJPEG na entrada, não do vídeo BGR transmitido.
-- `Confirmadas`: mensagens Kafka confirmadas pelo broker.
+O leitor precisa conectar **enquanto o produtor estiver ativo**. Se o socket não existir, confirme a seleção da câmera, se o produtor ainda está executando e se ambos os processos estão na **mesma Jetson**. Caso encontre um socket residual, investigue se há outro produtor ativo antes de removê-lo.
 
-**Socket ocupado:** o publicador evita iniciar silenciosamente em um caminho alternativo quando `/tmp/p4_video_shm` já existe. Se a execução anterior caiu abruptamente, verifique a existência de outro P4 e se há listener com `ss -xlpn | grep -F '/tmp/p4_video_shm'`. Apenas se tiver certeza de que o socket está abandonado, remova o arquivo antigo e reinicie. Não remova sockets de processos em uso.
+### 6.3. Como obter uma imagem visualizável
 
-## 8. Kafka local para desenvolvimento
+Receber os bytes RAW **não significa receber um PNG ou JPG**. Para obter uma imagem visualizável, o consumidor precisa:
 
-Instalar somente `confluent-kafka` **não instala o broker**. Nos testes, o broker foi executado por Docker no WSL2, com a imagem `apache/kafka:4.4.0`.
+1. Ler o pacote completo do `appsink`.
+2. Separar e validar o cabeçalho `P4R1`.
+3. Extrair os `data_size` bytes RAW e reconstruir a matriz `1920 × 1080` com amostras de 16 bits que contêm os dados de 10 bits.
+4. Interpretar o alinhamento dos 10 bits e aplicar o **demosaicing Bayer RGGB**, seguido de normalização/conversão para exibição.
+5. Salvar ou apresentar a imagem com uma ferramenta apropriada (por exemplo, OpenCV).
 
-### 8.1. Inicializar o broker
+**Atenção:** a implementação atual de `tests/shm_reader.py` **não salva imagem em disco**; ela imprime metadados e SHA-256. A geração automatizada de PNG/JPG pode ser adicionada em um leitor de visualização, após confirmar a disposição dos valores RAW no sensor. A visualização não deve alterar os bytes originais transportados pelo P4.
 
-Com Docker instalado e ativo:
+## 7. Protocolo P4R1 — identificação dos quadros
 
-```bash
-sudo service docker start
-sudo docker run -d --name p4-kafka -p 127.0.0.1:9092:9092 apache/kafka:4.4.0
-```
+A serialização fica em [`src/shm_protocol.py`](src/shm_protocol.py).
 
-O comando `docker run` cria o contêiner **uma vez**. Se ele já existir e estiver parado, reutilize-o:
+Formato de cada buffer:
 
-```bash
-sudo docker start p4-kafka
-```
+| Ordem | Tamanho | Conteúdo |
+| --- | --- | --- |
+| 1 | 4 bytes | ASCII `P4R1` (identificador do protocolo). |
+| 2 | 4 bytes | Comprimento do cabeçalho JSON (`uint32`, **big-endian**). |
+| 3 | Variável | JSON em UTF-8 com os metadados do quadro. |
+| 4 | `data_size` bytes | Quadro RAW original. |
 
-Verifique:
-
-```bash
-sudo docker ps
-```
-
-A porta foi exposta somente no endereço de loopback do computador de desenvolvimento. Isso não configura acesso de outras máquinas ao broker.
-
-### 8.2. Criar os tópicos
-
-```bash
-sudo docker exec p4-kafka /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server localhost:9092 \
-  --create --if-not-exists --topic ods.session.started \
-  --partitions 1 --replication-factor 1
-
-sudo docker exec p4-kafka /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server localhost:9092 \
-  --create --if-not-exists --topic ods.p4.frame \
-  --partitions 1 --replication-factor 1
-
-sudo docker exec p4-kafka /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server localhost:9092 --list
-```
-
-Os tópicos esperados são `ods.session.started` e `ods.p4.frame`.
-
-### 8.3. Consumir mensagens e confirmar a publicação
-
-Com o P4 em modo completo e Kafka ativado:
-
-```bash
-sudo docker exec p4-kafka /opt/kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server localhost:9092 \
-  --topic ods.p4.frame --max-messages 5
-```
-
-Para conferir eventos de início de sessão:
-
-```bash
-sudo docker exec p4-kafka /opt/kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server localhost:9092 \
-  --topic ods.session.started --max-messages 1
-```
-
-Sem `--from-beginning`, os comandos aguardam eventos novos; inicie o consumidor antes de iniciar a próxima sessão do P4. Para investigar eventos antigos, acrescente `--from-beginning`.
-
-O envio do produtor é **assíncrono**: enfileirar uma mensagem não equivale à entrega. O `KafkaPublisher` conta mensagens enfileiradas, confirmadas, falhas de entrega, falhas de enfileiramento e mensagens ainda pendentes ao encerrar. Usa `on_delivery`, fila limitada, timeout de mensagem e idempotência do produtor; **não garante persistência local nem entrega exata ponta a ponta**. A queda do broker durante captura já foi observada, mas o encerramento após falha, depois das correções, ainda precisa ser testado novamente. O `flush()` tem espera limitada.
-
-## 9. Frames, timestamps e metadados
-
-### 9.1. Estrutura `Frame`
-
-`src/frame.py` representa cada quadro por:
-
-| Campo | Significado |
-|---|---|
-| `data` | Bytes capturados do dispositivo (por exemplo, JPEG comprimido na EMEET) |
-| `width`, `height` | Dimensões do quadro |
-| `pixel_format` | Formato informado pela captura V4L2 |
-| `timestamp_ns` | Timestamp em unidade de nanossegundos |
-| `frame_index` | Número sequencial fornecido pelo buffer V4L2 no código atual |
-| `timestamp_origin` | Origem/semântica conhecida do timestamp |
-
-### 9.2. Metadados e eventos
-
-`src/p4.py` organiza `FrameMetadata`, incluindo `source_id`, `session_id`, `frame_index`, dimensões, formato, FPS, indicador `raw` e timestamps capturado/recebido.
-
-O evento de sessão é enviado ao tópico `ods.session.started`:
+Exemplo ilustrativo de cabeçalho JSON:
 
 ```json
 {
-  "event": "ods.session.started",
-  "source_id": "emeet",
-  "session_id": "identificador-da-sessao"
+  "source_id": "imx519",
+  "session_id": "<uuid>",
+  "frame_id": 30,
+  "timestamp": 20116516463000,
+  "width": 1920,
+  "height": 1080,
+  "format": "RG10",
+  "raw": true,
+  "data_size": 4147200
 }
 ```
 
-Os eventos por quadro são enviados ao tópico `ods.p4.frame`:
+O consumidor pode utilizar diretamente `ler_cabecalho(pacote)`:
+
+```python
+from src.shm_protocol import ler_cabecalho
+
+campos, inicio_raw = ler_cabecalho(pacote)
+dados_raw = pacote[inicio_raw:]
+
+assert len(dados_raw) == campos["data_size"]
+```
+
+A função rejeita identificadores incorretos, cabeçalhos incompletos e inconsistências entre o tamanho declarado e o recebido. **O protocolo P4R1 ainda é uma interface de integração proposta pelo P4:** é necessário formalizar sua adoção com os consumidores. A ordem de chegada dos eventos Kafka não substitui a identificação por `session_id` + `source_id` + `frame_id`.
+
+## 8. Eventos Kafka e metadados
+
+Os eventos são montados em [`src/events.py`](src/events.py), e a publicação está em [`src/kafka_publisher.py`](src/kafka_publisher.py).
+
+| Evento | Tópico usado no código | Quando ocorre |
+| --- | --- | --- |
+| Início da sessão | `ods.session.started` | Depois da primeira captura bem-sucedida, antes do primeiro frame ser entregue ao consumidor. |
+| Metadados do quadro | `ods.p4.frame` | Para cada quadro, no modo completo com Kafka ativado. |
+
+Envelope atual do evento de quadro (exemplo):
 
 ```json
 {
+  "message_id": "<uuid-da-mensagem>",
+  "message_type": "event",
   "schema": "ods.p4.frame",
+  "schema_version": "1.0",
   "producer": "P4",
-  "source_id": "emeet",
-  "session_id": "identificador-da-sessao",
+  "occurred_at": "2026-11-04T23:29:21.451088Z",
+  "source_id": "imx477",
+  "session_id": "<uuid-da-sessao>",
   "payload": {
     "frame_id": 30,
-    "timestamp": 10731799672000,
-    "width": 640,
-    "height": 480,
-    "format": "MJPG",
-    "fps": 15.64,
-    "raw": false
+    "timestamp": 20237661252000,
+    "width": 1920,
+    "height": 1080,
+    "format": "RG10",
+    "fps": 60.0,
+    "raw": true
   }
 }
 ```
 
-O `session_id` é gerado por instância do P4 e permite relacionar o início da sessão aos eventos dos quadros. O evento `ods.session.started` é gerado **após a primeira captura bem-sucedida**, antes de entregar o quadro ao consumidor. O Kafka recebe **um evento por quadro** no modo completo, enquanto o terminal imprime apenas um evento a cada 30 quadros.
+**Semântica temporal importante:**
 
-`fps` é calculado a partir da diferença entre timestamps consecutivos quando não há FPS fixo configurado; pode ser `null` no primeiro quadro. O indicador `raw` distingue imagens brutas de sensor de formatos como o MJPEG da EMEET.
+- `payload.timestamp` é um número em **nanossegundos** extraído do timestamp V4L2 (quando identificado como monotônico), **não uma data UTC**.
+- Nas câmeras CSI testadas, `timestamp_origin` foi observado como `driver_eof`; o instante sinalizado corresponde à semântica do driver, **não necessariamente ao início físico da exposição**.
+- `occurred_at` é a data/hora UTC de **montagem do evento**, não o timestamp físico do sensor.
+- A conversão opcional para UTC em `src/clock.py` é aproximada e está desativada na configuração principal (`CONVERTER_TIMESTAMP_UTC = False`).
+- Em diagnóstico, a diferença `received_at_ns - captured_at_ns` apresentou aproximadamente **−41,6 s** nas câmeras CSI, embora `CLOCK_MONOTONIC` e `CLOCK_BOOTTIME` diferissem apenas cerca de `0,004 ms`. **Ainda não consideramos essa métrica de latência confiável; a causa deve ser investigada antes de qualquer garantia de sincronização.**
+- O nome dos campos, suas unidades e os tópicos devem ser **conferidos com os contratos de TRA-1/Rafael** antes da integração final. Não pressupor que o esquema atual está homologado.
 
-### 9.3. Semântica temporal
+O produtor Kafka possui contadores de mensagens **enfileiradas**, **confirmadas**, **falhas de envio**, **falhas de entrega** e **pendentes**. Uma chamada bem-sucedida a `produce()` **não equivale** à confirmação de entrega; também não comprova que um consumidor recebeu o evento.
 
-- O `timestamp` publicado é um inteiro em **nanossegundos**, derivado do timestamp do buffer V4L2 quando seu relógio é identificado como monotônico.
-- Na EMEET, o driver apresentou `driver_soe` (*start of exposure*). Em outros drivers pode haver timestamp associado ao fim do quadro (*EOF*) ou outra origem.
-- A implementação converte o valor V4L2 de segundos e microssegundos para **unidade de nanossegundos**; isso **não cria precisão física de nanossegundos**.
-- Um timestamp monotônico **não é diretamente uma data UTC**. A opção `CONVERTER_TIMESTAMP_UTC=True` acrescenta `captured_at_utc` usando uma correspondência aproximada entre os relógios do sistema, preservando `payload.timestamp`.
-- Quando o relógio do driver não é reconhecido, a captura usa uma marca de recebimento; ela não deve ser apresentada como instante físico de exposição.
+## 9. Testes
 
-A validação dos timestamps das câmeras CSI continua necessária.
+### 9.1. Testes automatizados
 
-### 9.4. Limitação de sincronização entre SHM e Kafka
-
-O SHM transporta os pixels e o Kafka transporta os metadados. **O leitor `tests/shm_reader.py` ainda não recupera o `frame_id` original do buffer enviado pelo P4.** Seu contador de quadros é local.
-
-Portanto, **a transmissão simultânea já foi validada, mas a associação exata imagem ↔ evento Kafka ainda não foi implementada**. A solução precisa ser alinhada com o contrato do consumidor I1, especialmente para suportar início tardio e descartes de quadros.
-
-## 10. Integração com a Jetson: diagnóstico realizado e retomada presencial
-
-**Estado em 04/11/2026:** foi estabelecido acesso SSH à Jetson, o repositório local está disponível e o ambiente Python com `linuxpy` foi usado para executar o P4. O dispositivo `/dev/video0` aparece no V4L2, mas **ainda não forneceu nenhum quadro real**.
-
-### 10.1. Evidências encontradas
-
-- O `/dev/video0` apareceu como `vi-output, imx519 9-001a`, anunciando `RG10` e resoluções como 1920 × 1080 e 4656 × 3496. **Anunciar um formato não prova captura**.
-- Ao solicitar 1920 × 1080, o driver retornou 4656 × 3496; as tentativas de streaming não entregaram quadros antes do timeout.
-- O kernel registrou `imx519 9-001a: imx519_board_setup: invalid sensor model id: 477`: o driver da IMX519 encontrou uma identificação de sensor 477 no barramento I²C correspondente.
-- Também apareceu `imx519 10-001a: imx519_board_setup: error during i2c read probe (-121)`, indicando problema de comunicação com outro dispositivo.
-- A entrada de boot ativa utiliza overlay **`tegra234-p3767-camera-p3768-imx519-dual.dtbo`**, preparado para **duas IMX519**, enquanto o conjunto pretendido é IMX519 + IMX477.
-- Ao interromper uma tentativa de captura sem quadros, o kernel também registrou avisos de liberação de buffers `videobuf2` no driver. Por isso, suspenderam-se tentativas repetidas até verificar a configuração física e os drivers.
-
-Essas evidências demonstram **incompatibilidade na configuração atual**, mas **não comprovam qual cabo está conectado a qual porta** nem se há defeito físico. Um overlay misto foi preparado como candidato, mas **não foi ativado** e seu mapeamento precisa ser conferido com o hardware antes de aplicá-lo.
-
-### 10.2. Plano de retomada com acesso físico
-
-1. **Desligar totalmente** a Jetson antes de manusear cabos CSI e identificar fisicamente as câmeras IMX519 e IMX477 e suas portas.
-2. Inspecionar orientação/encaixe dos cabos e registrar o mapeamento real de conectores e barramentos.
-3. Conferir o overlay e os drivers apropriados para a configuração mista; manter backup e possibilidade de recuperação antes de alterar boot ou reiniciar.
-4. Validar o reconhecimento dos sensores no kernel e os nós V4L2, sem presumir que `/dev/video0` seja sempre a IMX519:
+Na raiz do projeto, com `venv` ativado:
 
 ```bash
-v4l2-ctl --list-devices
-ls -l /dev/video*
-v4l2-ctl -d /dev/video0 --list-formats-ext
-sudo dmesg | grep -Ei 'imx519|imx477|i2c|tegra-camrtc'
+python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-5. Somente quando driver/overlay estiverem coerentes, tentar uma captura curta via `v4l2-ctl` com formato e resolução **efetivamente negociados**.
-6. Quando V4L2 entregar quadros, atualizar o código na Jetson após confirmar que não há mudanças locais importantes e executar o P4 no diagnóstico:
+Na última execução registrada, **14 testes foram aprovados** (incluindo testes de P4, eventos, protocolo SHM, câmera simulada, métricas e publicador Kafka com mocks).
 
-```bash
-P4_CAMERA=imx519 P4_MODO_DIAGNOSTICO=true venv/bin/python -m src.main
+> Use **`test_*.py`**, não `teste_*.py`: há scripts legados que não fazem parte da suíte atual. Esses testes são complementares aos testes físicos de câmeras, SHM, Kafka e consumidores reais.
+
+### 9.2. Evidências e limites
+
+Já foram realizados testes de:
+
+- Captura das duas CSI **individualmente**, em modo diagnóstico e completo.
+- Leitura de pacotes P4R1 por um consumidor SHM de teste.
+- Integridade dos bytes RAW, por comparação SHA-256 em testes separados.
+- Recepção sequencial de 30 pacotes e leitura instrumentada de aproximadamente 120 quadros com taxas próximas de 60 FPS em ensaios específicos.
+- Comportamento de sucesso/falha do produtor Kafka usando mocks.
+
+**Ainda faltam:** teste end-to-end com broker Kafka autorizado na Jetson, interoperabilidade formal com consumidor real, duas CSI em paralelo, estresse, memória, backpressure e recuperação após falhas.
+
+## 10. Problemas conhecidos e próximos passos da Sprint 3
+
+1. **Timestamps:** investigar o salto inicial de 83,331 ms e a diferença negativa entre captura/recebimento; definir/validar a base temporal com as equipes responsáveis.
+2. **Contrato de eventos:** confirmar com TRA-1/Rafael os tópicos e o payload definitivo, incluindo a convenção de IDs e o relógio.
+3. **Kafka integrado:** validar entrega real em teste curto e autorizado, sem enviar pixels ao broker.
+4. **Consumidor de vídeo:** conectar I1/P6 ou outro componente real ao SHM e conferir `source_id`, `session_id`, `frame_id` e conteúdo bruto.
+5. **Duas câmeras:** executar IMX519 + IMX477 simultaneamente, com sockets separados, métricas e isolamento.
+6. **Estabilidade:** executar testes prolongados de FPS, memória, limites de buffers e desligamento/desconexão de consumidores.
+7. **Documentação e versionamento:** consolidar evidências, comandos reproduzíveis, validações e alterações ainda locais.
+
+O P4 é um componente de **aquisição de vídeo**. A correção de distorção e o desenvolvimento do consumidor real não fazem parte da implementação do P4, mas exigem alinhamento de interface.
+
+## 11. Arquivos principais
+
+```text
+p4/
+├── src/
+│   ├── main.py                 # Inicialização, modos e execução
+│   ├── config.py               # Câmeras CSI e sockets
+│   ├── v4l2_source.py          # Captura via V4L2 / linuxpy
+│   ├── source.py               # Interface de fonte de vídeo
+│   ├── frame.py                # Quadro capturado
+│   ├── metadata.py             # Metadados do quadro
+│   ├── p4.py                   # Sessão, leitura e entrega dos quadros
+│   ├── capture_metrics.py      # Métricas da captura
+│   ├── shm_protocol.py         # Serialização e leitura P4R1
+│   ├── shm_publisher.py        # GStreamer / SHM
+│   ├── events.py               # Eventos ods.session.started e ods.p4.frame
+│   ├── kafka_publisher.py      # Publicação Kafka
+│   └── clock.py                # Conversão temporal opcional
+├── tests/
+│   ├── shm_reader.py           # Leitor SHM de um pacote; não salva imagem
+│   ├── test_p4.py              # Testes P4
+│   ├── test_capture_metrics.py # Testes de métricas
+│   ├── test_events.py          # Testes dos eventos
+│   ├── test_shm_protocol.py    # Testes do protocolo
+│   └── test_kafka_publisher.py # Testes de produtor Kafka
+├── requirements.txt
+├── .gitignore
+└── README.md
 ```
 
-O comando acima pressupõe que a IMX519 foi identificada corretamente, sua entrada em `src/config.py` foi revisada e a `venv/` da Jetson continua disponível. A IMX477 permanece desabilitada até confirmação do driver e de sua configuração. **Não executar o modo completo com RAW10 usando o `SHMPublisher` atual, que aceita MJPEG.**
+**Nota sobre o repositório:** a pasta `venv/` contém o ambiente virtual local e **não deve entrar no Git**. O `.gitignore` publicado atualmente ignora `.venv/`, mas não `venv/`; na Jetson, `venv/` foi ignorada localmente em `.git/info/exclude`. Se for padronizar o repositório, acrescente `venv/` ao `.gitignore` versionado.
 
-## 11. Problemas conhecidos e próximos passos
+## 12. Preparação para compartilhar o repositório
 
-- **Jetson / sensores:** conferir conexões, driver, I²C, overlay e recepção real de buffers V4L2 antes de testar o P4 com CSI.
-- **Pipeline CSI:** adaptar SHM para o formato efetivamente recebido (Bayer RG10 ou formato convertido), com contrato de saída acordado com o I1.
-- **Sincronização exata:** definir como o I1 associa uma imagem SHM ao `frame_id` e `session_id` do Kafka; a ordem relativa dos dois canais não é garantia suficiente.
-- **Duas câmeras:** cada processo já pode selecionar sua fonte; captura simultânea, recursos e comportamento sob falhas ainda exigem teste.
-- **Confiabilidade:** revalidar encerramento após indisponibilidade do broker; testar queda/desconexão do consumidor SHM, estabilidade prolongada, drops, atrasos e uso de memória.
-- **Integração:** confirmar tópicos, esquema de metadados, timestamps e interface com os responsáveis pelos consumidores.
-
-### 11.1. Testes automatizados sem câmera
+As funcionalidades `P4_FRAME_LIMIT` e `P4_ATIVAR_KAFKA` e as últimas correções locais devem ser enviadas **junto com este README**. Antes de compartilhar comandos novos como se já estivessem publicados:
 
 ```bash
-python -m unittest discover -s tests -p "test_*.py" -v
-```
-
-Foram aprovados **5 testes** em 04/11/2026:
-
-1. Falha ao capturar o primeiro quadro não dispara `ods.session.started`.
-2. Evento de sessão é emitido uma única vez e antes da entrega dos frames ao consumidor.
-3. Timestamps e FPS calculados são coerentes com timestamps conhecidos.
-4. A detecção de saltos reconhece lacunas na sequência de identificadores.
-5. Duas instâncias do P4 conservam sessões, origens e métricas independentes, **em teste sequencial**.
-
-A suíte não substitui os ensaios com câmera real nem testes completos do broker e do SHM.
-
-## 12. Controle de versão
-
-A pasta `.venv/`, o backup local `src_old/`, imagens temporárias (como `i1_frame.jpg`), logs e vídeos de testes não devem ser incluídos no Git. Consulte `.gitignore` antes do commit.
-
-Para revisar as alterações:
-
-```bash
+# Conferir arquivos modificados
 git status --short
-git diff --stat
+
+# Conferir formatação básica
+git diff --check
+
+# Executar os testes atuais
+python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-Após conferir quais arquivos devem ser versionados, registrar a versão e enviar ao repositório remoto. Na Jetson, confirmar antes se a árvore de trabalho contém alterações locais importantes, para não sobrescrevê-las inadvertidamente ao atualizar o código.
+Depois de revisar as alterações, preparar um commit específico incluindo `README.md`, `src/main.py` e os testes alterados. **Não inclua `venv/`, sockets, arquivos RAW, capturas ou credenciais.**
 
 ---
 
-**Resumo:** o núcleo do P4 está implementado e validado com a EMEET: captura V4L2, timestamps, métricas, SHM, Kafka e testes automatizados. **Na Jetson ainda não houve captura de quadros CSI**: o próximo passo é conferir fisicamente as câmeras e corrigir a configuração dos drivers/overlays. Depois será necessário adaptar RAW10, validar duas câmeras e definir a correlação exata entre vídeo SHM e eventos Kafka.
+**Resumo para integração:** o P4 já captura vídeo RAW10 das duas CSI e o publica em pacotes identificados P4R1 pelo SHM local da Jetson. Um consumidor pode começar a validar a recepção pelos sockets documentados. **A conversão para uma imagem visualizável, o contrato definitivo com os consumidores, os timestamps e a entrega Kafka fim a fim ainda precisam de validação.**
