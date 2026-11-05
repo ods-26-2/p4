@@ -71,7 +71,7 @@ class TestKafkaPublisher(unittest.TestCase):
         self.assertEqual(publisher.confirmadas, 1)
         self.assertEqual(publisher.falhas_entrega, 0)
 
-    
+
     @patch("src.kafka_publisher.Producer")
     def test_falha_entrega(self, MockProducer):
         publisher = KafkaPublisher(

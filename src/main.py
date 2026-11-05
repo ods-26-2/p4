@@ -16,12 +16,18 @@ CAMERA_SELECIONADA = os.getenv("P4_CAMERA", "imx519")
 # Quantidade de quadros no modo diagnóstico
 LIMITE_QUADROS = 30
 
+# Limite opcional para o modo completo
+LIMITE_QUADROS_COMPLETO = os.getenv("P4_FRAME_LIMIT")
+
 MODO_DIAGNOSTICO = (
     os.getenv("P4_MODO_DIAGNOSTICO", "true").lower() == "true"
 )
 
 CONVERTER_TIMESTAMP_UTC = False
-ATIVAR_KAFKA = True
+
+ATIVAR_KAFKA = (
+    os.getenv("P4_ATIVAR_KAFKA", "true").lower() == "true"
+)
 
 KAFKA_SERVIDOR = os.getenv(
     "P4_KAFKA_BOOTSTRAP_SERVERS"
@@ -41,6 +47,21 @@ def main():
         return
 
     try:
+        # Define o limite de quadros
+        if MODO_DIAGNOSTICO:
+            limite = LIMITE_QUADROS
+
+        elif LIMITE_QUADROS_COMPLETO is None:
+            limite = None
+
+        else:
+            limite = int(LIMITE_QUADROS_COMPLETO)
+
+            if limite <= 0:
+                raise ValueError(
+                    "P4_FRAME_LIMIT deve ser maior que zero."
+                )
+
         # Inicializa a fonte de vídeo
         camera = V4L2Source(
             device=config["device"],
@@ -142,13 +163,10 @@ def main():
             f"Modo: {modo}"
         )
 
+        # Inicia a captura utilizando o limite configurado
         p4.run(
             consumer=receber_frame,
-            frame_limit=(
-                LIMITE_QUADROS
-                if MODO_DIAGNOSTICO
-                else None
-            ),
+            frame_limit=limite,
             on_session_started=informar_inicio_sessao
         )
 
