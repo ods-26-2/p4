@@ -10,7 +10,7 @@ O **P4** captura quadros de câmeras CSI por V4L2, preserva o conteúdo bruto da
 
 O componente oferece um **modo diagnóstico**, para testar somente a captura, e um **modo completo**, para publicar os quadros via SHM e, opcionalmente, os eventos via Kafka.
 
-> **Estado real em 05/11/2026:** as câmeras **IMX519** e **IMX477** já foram validadas **individualmente** na Jetson, com captura `1920 × 1080`, formato `RG10` (Bayer RAW10) e transmissão pelo SHM. O leitor de teste conseguiu receber pacotes P4R1, verificar os metadados e comparar a integridade dos bytes RAW com SHA-256 em testes anteriores. **Ainda não concluímos** a integração com um consumidor real do ODS, a validação simultânea das câmeras, a confirmação de publicação Kafka na Jetson nem os testes prolongados de estabilidade.
+> **Estado real em 05/11/2026:** as câmeras **IMX519** e **IMX477** foram validadas **individualmente** na Jetson em `1920 × 1080`, `RG10` (Bayer RAW10). O SHM foi testado com outro processo: o leitor recebeu, por exemplo, o frame 220 da IMX477, com 4.147.200 bytes RAW e SHA-256 calculado. Foi implementada e testada a normalização opcional dos timestamps TSC para `CLOCK_MONOTONIC_RAW`, e **19 testes automatizados** passaram. **Ainda não concluímos** a integração com um consumidor real do ODS, a validação simultânea das câmeras, a confirmação de publicação Kafka na Jetson nem os testes prolongados de estabilidade.
 
 ## 1. Arquitetura
 
@@ -22,6 +22,7 @@ Driver CSI + V4L2 / linuxpy
        │  RG10 / RAW10; sequência e timestamp do driver
        ▼
 P4 (Frame, FrameMetadata, sessão e métricas)
+       │  conversão TSC → MONOTONIC_RAW opcional (metadados)
        │
        ├─────────────────────────────────────┐
        │                                     │
@@ -52,16 +53,16 @@ Cabeçalho + bytes RAW10
 | Modo diagnóstico | **Validado**; captura 30 quadros por padrão, sem inicializar SHM ou Kafka. |
 | Frame, metadados e sessões | **Implementados** em `Frame`, `FrameMetadata` e `P4`. |
 | Transporte RAW10 via GStreamer/SHM | **Validado** em execuções limitadas, nas duas câmeras separadamente. |
-| Protocolo P4R1 | **Implementado e testado**; inclui IDs, timestamp, formato, dimensões e tamanho RAW. |
+| Protocolo P4R1 | **Implementado e testado**; inclui IDs, timestamp original, timestamp normalizado opcional, formato, dimensões e tamanho RAW. |
 | Recepção e integridade no leitor de teste | **Validada em testes separados**, inclusive por SHA-256; não equivale à homologação do I1 real. |
 | Eventos `ods.session.started` e `ods.p4.frame` | **Implementados**; gerados em JSON. |
 | Kafka no código | **Implementado**, com callbacks de confirmação, tratamento de falhas e testes simulados. |
 | Kafka compartilhado na Jetson | **Pendente de teste de publicação/consumo confirmado**. Contratos e tópicos devem ser alinhados com TRA-1/Rafael. |
-| Timestamps do driver | **Parcial**: origem `driver_eof` observada; ainda há uma discrepância temporal e um intervalo inicial a investigar. |
+| Timestamps do driver | **Conversão opcional implementada e testada**: TSC → `CLOCK_MONOTONIC_RAW` na IMX477 e IMX519; origem `driver_eof` observada. O salto inicial ocasional ainda não foi explicado. |
 | Execução simultânea de IMX519 e IMX477 | **Não validada**. |
 | Integração com consumidor real (I1/P6/outros) | **Pendente**. |
 | Estabilidade prolongada, perdas, memória e recuperação | **Pendente**. |
-| Testes automatizados | **14 testes aprovados** na última execução registrada durante o desenvolvimento. |
+| Testes automatizados | **19 testes aprovados** em 05/11/2026, incluindo conversor nativo simulado, integração P4 e timestamps nos pacotes SHM e eventos. |
 
 ### 2.1. Resultados obtidos na Jetson
 
@@ -74,7 +75,7 @@ Em testes do **modo completo com Kafka desativado**, usando **120 quadros por ex
 
 Cada execução reportou aproximadamente **497,69 MB** aceitos pelo `appsrc`, incluindo os cabeçalhos P4R1. Em testes **isolados de captura** e de **captura + SHM instrumentada**, a IMX477 apresentou aproximadamente **60 FPS**.
 
-O valor de 58 FPS foi influenciado por um intervalo de **83,331 ms entre os frames 1 e 2**, seguido de intervalos próximos de 16,667 ms. A causa ainda está sob investigação. Os testes não justificam afirmar uma perda contínua de 2 FPS.
+O valor de aproximadamente 58 FPS foi influenciado por um intervalo de **83,331 ms entre os frames 1 e 2** em uma execução do `main.py`, seguido de intervalos próximos de 16,667 ms. O intervalo entre leituras nesse ponto foi de aproximadamente 17,288 ms. A causa da descontinuidade nos timestamps ainda é desconhecida; **não há evidência suficiente de uma perda contínua de 2 FPS**. Essa investigação foi deixada como limitação conhecida para priorizar a integração.
 
 > `frames_aceitos_appsrc` significa que o GStreamer aceitou o buffer de entrada. **Não comprova que outro processo recebeu aquele quadro.** Essa recepção foi testada separadamente. Analogamente, `frames_perdidos_estimados = 0` não garante ausência absoluta de descartes no driver.
 
@@ -116,6 +117,7 @@ Requisitos do ambiente validado:
 - Python 3.10 ou outra versão compatível com as bibliotecas instaladas no dispositivo.
 - Pacotes Python do [`requirements.txt`](requirements.txt): `linuxpy==0.25.0`, `confluent-kafka==2.16.1`, `numpy` e `opencv-python`.
 - GStreamer com `appsrc`, `shmsink`, `shmsrc`, `appsink` e bindings Python `gi` / PyGObject.
+- Para ativar a normalização TSC: arquitetura **AArch64** e compilador **GCC**, usados para gerar uma biblioteca nativa local.
 
 Na **Jetson já configurada do projeto**, entre na pasta do repositório e ative o ambiente virtual existente:
 
@@ -133,7 +135,7 @@ sudo apt install -y \
   gir1.2-gstreamer-1.0 \
   gstreamer1.0-tools gstreamer1.0-plugins-base \
   gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
-  v4l-utils
+  v4l-utils gcc
 ```
 
 Para clonar e instalar as dependências Python:
@@ -162,6 +164,20 @@ gst-inspect-1.0 shmsrc
 
 > O `PYTHONPATH` acima reflete o **ambiente da Jetson testada**. Em outros sistemas, o caminho dos pacotes de sistema pode ser diferente. Não é necessário instalar ou iniciar um broker Kafka para testar **somente o SHM**.
 
+### 4.1. Compilar o conversor de relógios TSC (opcional)
+
+Na Jetson AArch64, a partir da raiz do repositório:
+
+```bash
+bash scripts/build_tsc_clock.sh
+```
+
+O script compila `src/tsc_clock.c` para `build/libp4_tsc_clock.so`, usando o contador ARM e `CLOCK_MONOTONIC_RAW` para medir, em execução, o deslocamento TSC → RAW. **Não existe offset fixo gravado no código.** A biblioteca compilada fica em `build/`, ignorada pelo Git; após clonar o repositório em outra Jetson, é necessário compilá-la novamente para utilizar `P4_NORMALIZAR_TSC=true`.
+
+A classe `src/tsc_converter.py` acessa a biblioteca via `ctypes`. A medição do offset acontece na inicialização do conversor, não a cada quadro. O teste na Jetson encontrou aproximadamente **42.208,155 ms** de offset; esse número é **resultado observado**, não uma constante a reutilizar em outros sistemas.
+
+A normalização só deve ser habilitada para as câmeras CSI verificadas (**IMX477** e **IMX519**) na Jetson testada. Os testes curtos indicaram diferenças estimadas de captura → leitura de cerca de **14–16 ms** para IMX477 e **20–22 ms** para IMX519, mas **não são uma calibração absoluta de latência** nem garantem sincronização com o áudio. A precisão e a estabilidade em sessões longas ainda precisam de avaliação.
+
 ## 5. Executando o P4
 
 Execute os comandos **na raiz do repositório**, com o ambiente virtual ativo.
@@ -173,10 +189,11 @@ Execute os comandos **na raiz do repositório**, com o ambiente virtual ativo.
 | `P4_CAMERA` | `imx519` | Câmera selecionada (`imx519` ou `imx477`). |
 | `P4_MODO_DIAGNOSTICO` | `true` | `true`: somente captura; `false`: modo completo. |
 | `P4_ATIVAR_KAFKA` | `true` | No modo completo, `false` desativa o envio ao Kafka. |
+| `P4_NORMALIZAR_TSC` | `false` | `true`: usa a biblioteca TSC para preencher timestamps em `CLOCK_MONOTONIC_RAW`; requer compilação prévia. |
 | `P4_FRAME_LIMIT` | Não definido | Limita o total de quadros **no modo completo**; sem valor, o fluxo é contínuo. |
 | `P4_KAFKA_BOOTSTRAP_SERVERS` | Não definido | Endereço do broker, obrigatório quando Kafka está ativo no modo completo. |
 
-**Nota de versão:** `P4_FRAME_LIMIT` e `P4_ATIVAR_KAFKA` foram adicionadas ao `src/main.py` **na cópia local da Jetson**. Elas precisam ser incluídas em um commit e enviadas ao GitHub para os comandos desta seção funcionarem em um clone novo. O modo diagnóstico permanece limitado a **30 quadros**, independentemente de `P4_FRAME_LIMIT`.
+O modo diagnóstico permanece limitado a **30 quadros**, independentemente de `P4_FRAME_LIMIT`. Para incluir os novos timestamps no SHM e nos eventos JSON, configure `P4_NORMALIZAR_TSC=true`; caso contrário, os campos normalizados ficam ausentes. Após clonar, gere primeiro a biblioteca com `bash scripts/build_tsc_clock.sh`.
 
 ### 5.2. Modo diagnóstico — somente captura
 
@@ -194,6 +211,19 @@ P4_CAMERA=imx477 P4_MODO_DIAGNOSTICO=true python -m src.main
 
 Captura 30 quadros e imprime metadados periodicamente. Não inicializa os publicadores de SHM ou Kafka; o evento de início da sessão aparece **apenas no terminal**.
 
+Para inspecionar a conversão com a IMX477, após compilar a biblioteca:
+
+```bash
+PYTHONPATH=/usr/lib/python3/dist-packages \
+P4_CAMERA=imx477 \
+P4_MODO_DIAGNOSTICO=true \
+P4_NORMALIZAR_TSC=true \
+P4_ATIVAR_KAFKA=false \
+python -m src.main
+```
+
+Nesse modo, o P4 exibe periodicamente a diferença **estimada** entre captura e leitura em `CLOCK_MONOTONIC_RAW`. Ambas as câmeras foram testadas nessa condição, com cerca de 60 FPS em execuções de 30 frames.
+
 ### 5.3. Modo completo — SHM sem Kafka
 
 **IMX519 — teste limitado a 120 quadros:**
@@ -202,6 +232,7 @@ Captura 30 quadros e imprime metadados periodicamente. Não inicializa os public
 PYTHONPATH=/usr/lib/python3/dist-packages \
 P4_CAMERA=imx519 \
 P4_MODO_DIAGNOSTICO=false \
+P4_NORMALIZAR_TSC=true \
 P4_ATIVAR_KAFKA=false \
 P4_FRAME_LIMIT=120 \
 python -m src.main
@@ -213,12 +244,13 @@ python -m src.main
 PYTHONPATH=/usr/lib/python3/dist-packages \
 P4_CAMERA=imx477 \
 P4_MODO_DIAGNOSTICO=false \
+P4_NORMALIZAR_TSC=true \
 P4_ATIVAR_KAFKA=false \
 P4_FRAME_LIMIT=120 \
 python -m src.main
 ```
 
-O programa abre a câmera selecionada, publica pacotes P4R1 no socket configurado, imprime eventos de exemplo e encerra automaticamente após o limite. **Não há envio ao Kafka** quando `P4_ATIVAR_KAFKA=false`.
+O programa abre a câmera selecionada, publica pacotes P4R1 no socket configurado, imprime eventos de exemplo e encerra automaticamente após o limite. **Não há envio ao Kafka** quando `P4_ATIVAR_KAFKA=false`. Nos exemplos acima, `P4_NORMALIZAR_TSC=true` adiciona ao cabeçalho SHM o timestamp convertido sem substituir o original; compile a biblioteca antes de executar.
 
 Se quiser conectar um leitor em outro terminal, **120 quadros duram aproximadamente 2 segundos**. Use um limite maior, por exemplo `P4_FRAME_LIMIT=600` (cerca de 10 segundos), ou omita o limite e finalize depois com `Ctrl+C`.
 
@@ -232,6 +264,7 @@ export P4_KAFKA_BOOTSTRAP_SERVERS="HOST_DO_BROKER:PORTA"
 PYTHONPATH=/usr/lib/python3/dist-packages \
 P4_CAMERA=imx519 \
 P4_MODO_DIAGNOSTICO=false \
+P4_NORMALIZAR_TSC=true \
 P4_ATIVAR_KAFKA=true \
 P4_FRAME_LIMIT=30 \
 python -m src.main
@@ -260,49 +293,39 @@ O consumidor deve utilizar `shmsrc` e `appsink` para acessar os bytes, depois va
 
 O arquivo [`tests/shm_reader.py`](tests/shm_reader.py) é um **leitor de validação**, não um decodificador de imagem. Ele recebe **um pacote**, interpreta o cabeçalho e imprime `source_id`, `session_id`, `frame_id`, formato, quantidade de bytes RAW e hash SHA-256.
 
-**Importante:** a versão atual do script aponta para **`/tmp/p4_raw_teste_shm`**, utilizado nos testes isolados. Para ler uma câmera real, é necessário mudar o caminho do socket. Um modo de testar **sem editar arquivos versionados** é criar uma cópia temporária:
+O leitor seleciona o socket automaticamente por `P4_CAMERA`, consultando [`src/config.py`](src/config.py); não é necessário editar o código nem criar cópias temporárias.
 
-**Terminal A — iniciar a IMX519 na Jetson:**
+**Terminal A — iniciar a IMX477 na Jetson:**
 
 ```bash
 cd ~/SIS-2/p4
 source venv/bin/activate
 
 PYTHONPATH=/usr/lib/python3/dist-packages \
-P4_CAMERA=imx519 \
+P4_CAMERA=imx477 \
 P4_MODO_DIAGNOSTICO=false \
+P4_NORMALIZAR_TSC=true \
 P4_ATIVAR_KAFKA=false \
 P4_FRAME_LIMIT=600 \
 python -m src.main
 ```
 
-**Terminal B — enquanto o P4 está em execução, ler um pacote:**
+**Terminal B — conectar enquanto o produtor estiver em execução:**
 
 ```bash
 cd ~/SIS-2/p4
 source venv/bin/activate
 
-sed 's@/tmp/p4_raw_teste_shm@/tmp/p4_imx519_shm@' \
-  tests/shm_reader.py > /tmp/p4_imx519_reader.py
-
+P4_CAMERA=imx477 \
 PYTHONPATH="$PWD:/usr/lib/python3/dist-packages" \
-  python /tmp/p4_imx519_reader.py
+python tests/shm_reader.py
 ```
 
-Para a **IMX477**, troque `P4_CAMERA=imx519` por `P4_CAMERA=imx477` no terminal A e substitua o caminho no comando `sed` por `/tmp/p4_imx477_shm` no terminal B.
+Para a IMX519, substitua `P4_CAMERA=imx477` por `P4_CAMERA=imx519` **nos dois terminais**.
 
-Exemplo de saída esperada do leitor (identificadores variam):
+Uma execução real em 05/11/2026 recebeu o frame **220** da IMX477, identificou o formato `RG10`, leu **4.147.200 bytes** RAW e calculou SHA-256. Isso confirma que outro processo consegue receber e interpretar **um pacote**; o hash calculado isoladamente não prova que foi comparado com um hash do produtor nesta execução, nem que todos os 600 frames foram entregues.
 
-```text
-Câmera: imx519
-Sessão: <uuid-da-execucao>
-Frame ID: <numero-do-quadro>
-Formato: RG10
-Bytes RAW recebidos: 4147200
-SHA-256 RAW: <hash-hexadecimal>
-```
-
-O leitor precisa conectar **enquanto o produtor estiver ativo**. Se o socket não existir, confirme a seleção da câmera, se o produtor ainda está executando e se ambos os processos estão na **mesma Jetson**. Caso encontre um socket residual, investigue se há outro produtor ativo antes de removê-lo.
+O leitor deve conectar **enquanto o produtor está ativo**, na **mesma Jetson**. Se não houver socket, confira a câmera selecionada, o processo produtor e eventuais sockets residuais; não remova sockets sem verificar se outro produtor está em uso.
 
 ### 6.3. Como obter uma imagem visualizável
 
@@ -337,6 +360,8 @@ Exemplo ilustrativo de cabeçalho JSON:
   "session_id": "<uuid>",
   "frame_id": 30,
   "timestamp": 20116516463000,
+  "timestamp_monotonic_raw_ns": 20074308307688,
+  "timestamp_monotonic_raw_clock": "CLOCK_MONOTONIC_RAW",
   "width": 1920,
   "height": 1080,
   "format": "RG10",
@@ -344,6 +369,8 @@ Exemplo ilustrativo de cabeçalho JSON:
   "data_size": 4147200
 }
 ```
+
+`timestamp` continua sendo o valor **original** do driver V4L2, na referência observada como TSC nesta Jetson. Os campos `timestamp_monotonic_raw_ns` e `timestamp_monotonic_raw_clock` são **opcionais** e só aparecem quando `P4_NORMALIZAR_TSC=true`. O número `timestamp_monotonic_raw_ns` representa uma base monotônica RAW, **não UTC**. Estes campos foram adicionados sem mudar o prefixo binário `P4R1`; consumidores com esquema rígido de JSON devem conferir a compatibilidade antes da integração.
 
 O consumidor pode utilizar diretamente `ler_cabecalho(pacote)`:
 
@@ -382,6 +409,8 @@ Envelope atual do evento de quadro (exemplo):
   "payload": {
     "frame_id": 30,
     "timestamp": 20237661252000,
+    "timestamp_monotonic_raw_ns": 20195453096688,
+    "timestamp_monotonic_raw_clock": "CLOCK_MONOTONIC_RAW",
     "width": 1920,
     "height": 1080,
     "format": "RG10",
@@ -393,12 +422,14 @@ Envelope atual do evento de quadro (exemplo):
 
 **Semântica temporal importante:**
 
-- `payload.timestamp` é um número em **nanossegundos** extraído do timestamp V4L2 (quando identificado como monotônico), **não uma data UTC**.
-- Nas câmeras CSI testadas, `timestamp_origin` foi observado como `driver_eof`; o instante sinalizado corresponde à semântica do driver, **não necessariamente ao início físico da exposição**.
-- `occurred_at` é a data/hora UTC de **montagem do evento**, não o timestamp físico do sensor.
-- A conversão opcional para UTC em `src/clock.py` é aproximada e está desativada na configuração principal (`CONVERTER_TIMESTAMP_UTC = False`).
-- Em diagnóstico, a diferença `received_at_ns - captured_at_ns` apresentou aproximadamente **−41,6 s** nas câmeras CSI, embora `CLOCK_MONOTONIC` e `CLOCK_BOOTTIME` diferissem apenas cerca de `0,004 ms`. **Ainda não consideramos essa métrica de latência confiável; a causa deve ser investigada antes de qualquer garantia de sincronização.**
-- O nome dos campos, suas unidades e os tópicos devem ser **conferidos com os contratos de TRA-1/Rafael** antes da integração final. Não pressupor que o esquema atual está homologado.
+- `payload.timestamp` e o campo homônimo do P4R1 contêm o timestamp **original** do driver V4L2, em nanossegundos. Para as câmeras CSI da Jetson testada, as medições indicam uma referência baseada no **TSC do hardware**, apesar da sinalização monotônica nos flags V4L2. **Não é data UTC nem deve ser comparado diretamente com `CLOCK_MONOTONIC` do Python.**
+- `timestamp_monotonic_raw_ns` (no payload e no P4R1) e `timestamp_monotonic_raw_clock` aparecem **somente com a normalização ativada**. A conversão estimada aplica `timestamp_original_ns - offset_tsc_raw_ns`, onde o offset é medido dinamicamente com o auxiliar C e `CLOCK_MONOTONIC_RAW`.
+- `FrameMetadata` também pode conter `captured_at_monotonic_raw_ns` e `received_at_monotonic_raw_ns` para comparar os dois instantes na mesma referência; `received_at_ns` continua seguindo a lógica antiga, em `CLOCK_MONOTONIC` para frames do driver. **Não subtraia valores de bases diferentes.**
+- A origem observada foi `driver_eof`, que descreve a semântica informada pelo driver e **não equivale necessariamente ao início da exposição do sensor**.
+- `occurred_at` é o horário UTC de **montagem do evento**, não o instante físico de exposição ou de captura.
+- `src/clock.py` contém uma conversão UTC legada baseada em `CLOCK_MONOTONIC`, **desativada** (`CONVERTER_TIMESTAMP_UTC=False`); não a aplique diretamente ao timestamp TSC original.
+- A relação TSC → RAW foi consistente nos testes curtos, mas **não foi validada para estabilidade de longo prazo, precisão absoluta ou sincronização com o P5**. Para áudio e vídeo alinhados, P5 e consumidores devem adotar a mesma referência de relógio ou um mapeamento acordado.
+- Os campos adicionais, suas unidades e os tópicos precisam de **confirmação com TRA-1/Rafael e consumidores**, incluindo eventuais validadores de esquema estritos. A publicação real no broker Kafka ainda não foi confirmada.
 
 O produtor Kafka possui contadores de mensagens **enfileiradas**, **confirmadas**, **falhas de envio**, **falhas de entrega** e **pendentes**. Uma chamada bem-sucedida a `produce()` **não equivale** à confirmação de entrega; também não comprova que um consumidor recebeu o evento.
 
@@ -412,7 +443,7 @@ Na raiz do projeto, com `venv` ativado:
 python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-Na última execução registrada, **14 testes foram aprovados** (incluindo testes de P4, eventos, protocolo SHM, câmera simulada, métricas e publicador Kafka com mocks).
+Na última execução registrada em **05/11/2026, 19 testes foram aprovados**. A suíte inclui P4, eventos, protocolo SHM, metadados normalizados, conversor TSC com mocks, métricas, V4L2 simulado e publicador Kafka com mocks.
 
 > Use **`test_*.py`**, não `teste_*.py`: há scripts legados que não fazem parte da suíte atual. Esses testes são complementares aos testes físicos de câmeras, SHM, Kafka e consumidores reais.
 
@@ -425,18 +456,21 @@ Já foram realizados testes de:
 - Integridade dos bytes RAW, por comparação SHA-256 em testes separados.
 - Recepção sequencial de 30 pacotes e leitura instrumentada de aproximadamente 120 quadros com taxas próximas de 60 FPS em ensaios específicos.
 - Comportamento de sucesso/falha do produtor Kafka usando mocks.
+- Leitura real de um frame RAW10 da IMX477 por um processo separado (`tests/shm_reader.py`), inclusive identificação de frame, tamanho e cálculo de SHA-256.
+- Normalização opcional TSC → `CLOCK_MONOTONIC_RAW` nas câmeras IMX477 e IMX519, em testes diagnósticos de 30 frames; testes unitários dos novos campos no SHM e nos eventos.
 
 **Ainda faltam:** teste end-to-end com broker Kafka autorizado na Jetson, interoperabilidade formal com consumidor real, duas CSI em paralelo, estresse, memória, backpressure e recuperação após falhas.
 
 ## 10. Problemas conhecidos e próximos passos da Sprint 3
 
-1. **Timestamps:** investigar o salto inicial de 83,331 ms e a diferença negativa entre captura/recebimento; definir/validar a base temporal com as equipes responsáveis.
-2. **Contrato de eventos:** confirmar com TRA-1/Rafael os tópicos e o payload definitivo, incluindo a convenção de IDs e o relógio.
-3. **Kafka integrado:** validar entrega real em teste curto e autorizado, sem enviar pixels ao broker.
-4. **Consumidor de vídeo:** conectar I1/P6 ou outro componente real ao SHM e conferir `source_id`, `session_id`, `frame_id` e conteúdo bruto.
-5. **Duas câmeras:** executar IMX519 + IMX477 simultaneamente, com sockets separados, métricas e isolamento.
-6. **Estabilidade:** executar testes prolongados de FPS, memória, limites de buffers e desligamento/desconexão de consumidores.
-7. **Documentação e versionamento:** consolidar evidências, comandos reproduzíveis, validações e alterações ainda locais.
+1. **Contrato de timestamps e sincronização com P5:** acordar relógio comum, nomenclatura e semântica de timestamp original versus normalizado. A conversão TSC → `CLOCK_MONOTONIC_RAW` está implementada e testada localmente, mas a sincronização de áudio e vídeo **não está homologada**.
+2. **Contrato de eventos:** confirmar com TRA-1/Rafael os tópicos, a versão do schema B2 e a aceitação dos campos opcionais `timestamp_monotonic_raw_ns` e `timestamp_monotonic_raw_clock` pelos consumidores.
+3. **Kafka integrado:** validar a publicação real e a confirmação de entrega em broker autorizado, sem enviar pixels ao Kafka.
+4. **Consumidor real de vídeo:** conectar I1/P6 ou outro componente do ODS ao SHM. O leitor de teste já recebe um pacote RAW10, mas isso **não substitui** a homologação com o consumidor real.
+5. **Duas câmeras:** validar IMX519 e IMX477 simultaneamente com sockets separados e métricas independentes.
+6. **Estabilidade:** executar testes prolongados de FPS, memória, backpressure, reconexão e recuperação após falhas.
+7. **Descontinuidade inicial ocasional:** em uma execução do `main.py`, os timestamps do driver saltaram **83,331 ms** entre os frames 1 e 2, enquanto as leituras ficaram próximas de 17 ms. O FPS médio relatado chegou a aproximadamente 58 FPS, mas o teste isolado de 120 frames com TSC e SHM marcou 60 FPS. **Não foi comprovada perda contínua de 2 FPS; o problema não bloqueia a entrega funcional atual.**
+8. **Versionamento:** revisar, testar e publicar os arquivos modificados; incluir as instruções de compilação nativa e os novos testes.
 
 O P4 é um componente de **aquisição de vídeo**. A correção de distorção e o desenvolvimento do consumidor real não fazem parte da implementação do P4, mas exigem alinhamento de interface.
 
@@ -450,34 +484,43 @@ p4/
 │   ├── v4l2_source.py          # Captura via V4L2 / linuxpy
 │   ├── source.py               # Interface de fonte de vídeo
 │   ├── frame.py                # Quadro capturado
-│   ├── metadata.py             # Metadados do quadro
-│   ├── p4.py                   # Sessão, leitura e entrega dos quadros
+│   ├── metadata.py             # Metadados originais e normalizados
+│   ├── p4.py                   # Sessão, leitura e normalização opcional
 │   ├── capture_metrics.py      # Métricas da captura
 │   ├── shm_protocol.py         # Serialização e leitura P4R1
 │   ├── shm_publisher.py        # GStreamer / SHM
 │   ├── events.py               # Eventos ods.session.started e ods.p4.frame
 │   ├── kafka_publisher.py      # Publicação Kafka
-│   └── clock.py                # Conversão temporal opcional
+│   ├── clock.py                # Conversão UTC legada, desativada
+│   ├── tsc_clock.c             # Medição nativa do offset TSC → RAW
+│   └── tsc_converter.py        # Wrapper ctypes para conversão TSC
+├── scripts/
+│   └── build_tsc_clock.sh      # Compilação da biblioteca na Jetson AArch64
 ├── tests/
 │   ├── shm_reader.py           # Leitor SHM de um pacote; não salva imagem
 │   ├── test_p4.py              # Testes P4
+│   ├── test_p4_tsc.py          # Metadados normalizados no P4
 │   ├── test_capture_metrics.py # Testes de métricas
 │   ├── test_events.py          # Testes dos eventos
+│   ├── test_event_timestamps.py # Timestamp normalizado em eventos
 │   ├── test_shm_protocol.py    # Testes do protocolo
+│   ├── test_shm_timestamps.py  # Timestamp normalizado em P4R1
+│   ├── test_tsc_converter.py   # Conversor TSC com mocks
 │   └── test_kafka_publisher.py # Testes de produtor Kafka
+├── build/                      # Binários locais: ignorados pelo Git
 ├── requirements.txt
 ├── .gitignore
 └── README.md
 ```
 
-**Nota sobre o repositório:** a pasta `venv/` contém o ambiente virtual local e **não deve entrar no Git**. O `.gitignore` publicado atualmente ignora `.venv/`, mas não `venv/`; na Jetson, `venv/` foi ignorada localmente em `.git/info/exclude`. Se for padronizar o repositório, acrescente `venv/` ao `.gitignore` versionado.
+**Arquivos locais:** `venv/`, `build/`, sockets, dados RAW capturados e credenciais **não devem ser versionados**. O `.gitignore` atual ignora `/build/`; confira também que o diretório do ambiente virtual `venv/` permaneça excluído antes do commit.
 
 ## 12. Preparação para compartilhar o repositório
 
-As funcionalidades `P4_FRAME_LIMIT` e `P4_ATIVAR_KAFKA` e as últimas correções locais devem ser enviadas **junto com este README**. Antes de compartilhar comandos novos como se já estivessem publicados:
+As alterações atuais incluem código-fonte da biblioteca TSC, wrapper Python, script de compilação, campos opcionais nos contratos SHM e B2, testes e o leitor com seleção de câmera por variável de ambiente.
 
 ```bash
-# Conferir arquivos modificados
+# Conferir arquivos modificados e possíveis artefatos locais
 git status --short
 
 # Conferir formatação básica
@@ -485,10 +528,13 @@ git diff --check
 
 # Executar os testes atuais
 python -m unittest discover -s tests -p 'test_*.py' -v
+
+# Conferir arquivos a serem enviados antes de commitar
+git diff --stat
 ```
 
-Depois de revisar as alterações, preparar um commit específico incluindo `README.md`, `src/main.py` e os testes alterados. **Não inclua `venv/`, sockets, arquivos RAW, capturas ou credenciais.**
+Revise e versione os arquivos alterados, incluindo `README.md`, `scripts/build_tsc_clock.sh`, `src/tsc_clock.c`, `src/tsc_converter.py` e os testes novos. Não inclua a biblioteca compilada `build/libp4_tsc_clock.so`, ambientes virtuais, sockets, quadros RAW ou credenciais. **As funcionalidades descritas como locais e testadas não devem ser anunciadas como publicadas no GitHub até o push ser concluído.**
 
 ---
 
-**Resumo para integração:** o P4 já captura vídeo RAW10 das duas CSI e o publica em pacotes identificados P4R1 pelo SHM local da Jetson. Um consumidor pode começar a validar a recepção pelos sockets documentados. **A conversão para uma imagem visualizável, o contrato definitivo com os consumidores, os timestamps e a entrega Kafka fim a fim ainda precisam de validação.**
+**Resumo para integração:** o P4 captura vídeo RAW10 das duas CSI **individualmente** e publica pacotes identificados P4R1 no SHM local da Jetson. Um processo de teste recebeu e interpretou um pacote real da IMX477. A normalização opcional TSC → `CLOCK_MONOTONIC_RAW` já está implementada e documentada, preservando os timestamps originais. **A conversão para uma imagem visualizável, a homologação do contrato com consumidores e P5, as duas câmeras em paralelo e a entrega Kafka fim a fim ainda dependem de validação.**

@@ -1,6 +1,9 @@
 
 import hashlib
 import gi
+import os
+
+from src.config import CAMERAS
 
 gi.require_version("Gst", "1.0")
 from gi.repository import Gst
@@ -11,8 +14,10 @@ Gst.init(None)
 
 
 def main():
+    camera = os.getenv("P4_CAMERA", "imx477")
+    socket_path = CAMERAS[camera]["socket_path"]
     pipeline_description = (
-        "shmsrc socket-path=/tmp/p4_raw_teste_shm "
+        f"shmsrc socket-path={socket_path} "
         "is-live=true do-timestamp=true "
         "! application/x-ods-frame,version=1,"
         "width=1920,height=1080,storage-bits=16,framerate=0/1 "

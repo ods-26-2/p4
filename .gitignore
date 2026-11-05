@@ -25,3 +25,6 @@ videos/
 # Arquivos locais
 .env
 *.log
+
+# Bibliotecas e arquivos compilados localmente
+/build/

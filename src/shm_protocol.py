@@ -18,6 +18,21 @@ def criar_cabecalho(metadata: FrameMetadata, tamanho_dados: int) -> bytes:
         "data_size": tamanho_dados
     }
 
+    # Obtém o timestamp normalizado, quando disponível.
+    timestamp_raw = getattr(
+        metadata,
+        "captured_at_monotonic_raw_ns",
+        None
+    )
+
+    # Preserva a compatibilidade com metadados antigos.
+    if timestamp_raw is not None:
+        campos["timestamp_monotonic_raw_ns"] = timestamp_raw
+        campos["timestamp_monotonic_raw_clock"] = (
+            "CLOCK_MONOTONIC_RAW"
+        )
+
+
     conteudo = json.dumps(campos).encode("utf-8")
 
     return b"P4R1" + struct.pack("!I", len(conteudo)) + conteudo
